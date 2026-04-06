@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jobautopilot-claude"
+version = "1.0.0"
+description = "AI-powered job search, resume tailoring, and application pipeline using Claude agents + Playwright MCP"
+readme = "README.md"
+license = { text = "MIT-0" }
+requires-python = ">=3.11"
+dependencies = [
+    "claude-agent-sdk",
+    "anyio",
+    "python-docx",
+    "lxml",
+]
+
+[project.scripts]
+jobautopilot = "jobautopilot_claude.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agents*", "jobautopilot_claude*"]
+
+[tool.setuptools.package-data]
+"*" = ["skills/**/*"]
