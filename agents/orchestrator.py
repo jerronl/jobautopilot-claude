@@ -18,7 +18,7 @@ _RESET   = "\033[0m"
 _ANSI_RE = re.compile(r'\033\[[0-9;]*m')  # strip existing ANSI codes before recoloring
 
 _ICONS = {
-    "[Orchestrator]": "🎯",
+    "[Orchestrator]": "🎬",
     "[Tailor]":       "✂️ ",
     "[Search]":       "🔍",
     "[Submitter]":    "📨",
@@ -127,7 +127,7 @@ def _stream_text(text: str) -> None:
         line, _line_buf = _line_buf.split("\n", 1)
         _flush_line(line)
 
-from .base import base_env, WORKSPACE, SKILLS_DIR
+from .base import base_env, WORKSPACE, SKILLS_DIR, REPO_ROOT
 from .search import definition as search_def
 from .tailor import definition as tailor_def
 from .submitter import definition as submitter_def
@@ -250,6 +250,23 @@ If that total is already ≥ target, skip search entirely — there is already e
 If the user's prompt contains a shortlist count (e.g. "stop after 10 shortlists", "find 5 jobs",
 "shortlist-target 20"), extract that number and override the env var for this run only.
 
+## Startup — open blocked job pages for manual handling
+
+Immediately after reading the tracker (step 1 below), before launching any agents:
+
+1. Find the first 5 `blocked` entries in the tracker that have a URL in their Notes field.
+2. Open them in the background using Bash:
+   ```bash
+   ~/voracle-env/bin/python3 "$BROWSER_LOGIN_SCRIPT" \
+     "$RESUME_OUTPUT_DIR/state/_browser/user_data" \
+     '["url1","url2","url3","url4","url5"]' &
+   ```
+3. Print one line per URL opened:
+   `[Orchestrator] 🌐 Opened for manual review: Company — Role (url)`
+4. Continue immediately — do not wait for the user.
+
+This lets the user log in and submit blocked jobs manually while the pipeline runs autonomously.
+
 ## Your responsibilities — pipeline parallelism
 
 **Do NOT run stages sequentially.** Run all stages that have work simultaneously by calling
@@ -293,6 +310,7 @@ Rules:
 - [Submitter] for each result line reported back from the submitter subagent
 - [Search] for each result line reported back from the search subagent
 - One line per job — no multi-line blocks between jobs
+- Stage icons: 🎬 Orchestrator · 🔍 Search · ✂️ Tailor · 📨 Submitter — use these everywhere, never 📄 for tailor
 
 ## Critical rules — do NOT violate
 
@@ -327,6 +345,7 @@ async def run(prompt: str, stream: bool = True, headed: bool = True) -> str:
         "SUBMIT_RUNNER":    str(SKILLS_DIR / "submitter" / "scripts" / "submit_runner.py"),
         "CREDENTIALS_FILE": os.environ.get("CREDENTIALS_FILE", str(WORKSPACE / "credentials.md")),
         "SEARCH_PROGRESS_LOG": str(WORKSPACE / "state" / "search_progress.log"),
+        "BROWSER_LOGIN_SCRIPT": str(REPO_ROOT / "scripts" / "browser_login.py"),
         "USER_GENDER":      os.environ.get("USER_GENDER", ""),
         "USER_RACE":        os.environ.get("USER_RACE", ""),
         "USER_HISPANIC":    os.environ.get("USER_HISPANIC", ""),

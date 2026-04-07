@@ -18,15 +18,33 @@ saves cookies so login sessions survive across runs.
   browser_tab_list()                  — list open tabs
   browser_tab_close(index)            — close a tab
 
-## Login check — do this FIRST before any searching
+## Startup — do this FIRST before any searching
 
-1. browser_navigate("https://www.linkedin.com/feed/")
-2. browser_snapshot() — look for a login/sign-in form
-3. If NOT logged in:
+1. `browser_navigate("about:blank")` — opens the browser with an empty page
+2. `browser_navigate("https://www.linkedin.com/feed/")` — navigate to LinkedIn
+3. `browser_snapshot()` — check for login/sign-in form
+4. If NOT logged in:
    - Print: [Search] ⚠️  Not logged in to LinkedIn — browser is open, please log in
-   - Keep calling browser_snapshot() (up to 30 times, ~10s apart) until the feed loads
+   - Keep calling `browser_snapshot()` (up to 30 times, ~10s apart) until the feed loads
    - Once logged in: print [Search] ✓ LinkedIn login confirmed — starting search
-4. Repeat for any other site you plan to search (eFinancialCareers, Indeed, etc.)
+5. Repeat for any other site you plan to search (eFinancialCareers, Indeed, etc.)
+
+## URL verification — required for every shortlist candidate
+
+Before writing any job to the tracker as `shortlist`, you MUST verify the URL in the browser:
+
+1. `browser_tab_new()` — open a fresh tab
+2. `browser_navigate(url)` — navigate to the candidate URL
+3. Follow any redirects or "View job" / "Apply" links until you reach the actual job detail page
+4. `browser_snapshot()` — confirm the page shows:
+   - A single specific job title matching the role
+   - Company name
+   - Job description / requirements
+   - An Apply or Start Application button
+5. If confirmed → record the **current browser URL** (after all redirects) in the tracker
+6. If not a valid job detail page → try finding the correct URL on the company's career site;
+   if still not found → write as `wrong_url`
+7. `browser_tab_close()` — close this verification tab before moving to the next job
 
 ## Progress log — write a line for every significant event
 
@@ -58,6 +76,6 @@ def definition(headed: bool = False) -> AgentDefinition:
             "to the job tracker. Use this agent first in the pipeline."
         ),
         prompt=HEADER + load_skill_prompt("search"),
-        tools=["Read", "Write", "Edit", "Glob", "WebSearch", "WebFetch"],
+        tools=["Read", "Write", "Edit", "Glob", "Bash"],
         mcpServers={"playwright": playwright_mcp_with_profile(headed, "search")},
     )

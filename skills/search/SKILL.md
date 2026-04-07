@@ -148,7 +148,7 @@ Status values: `found` | `screen_reject` | `user_reject` | `shortlist` | `tailor
 - `wrong_url` — URL leads to a generic page or wrong role
 - `error` — permanent failure (resume mismatch, form unparse-able, broken URL)
 
-Both kept and rejected results must be recorded. Every kept result must include the exact job URL in the Notes column.
+Both kept and rejected results must be recorded. Every kept result must include the exact job URL in the Notes column. The URL must be verified in the browser (see "URL verification" in the agent header) — use the final URL after all redirects, not the source listing link.
 
 ## Output format
 

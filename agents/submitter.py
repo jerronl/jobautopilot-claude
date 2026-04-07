@@ -38,10 +38,14 @@ Read the output. If `page.needs_login` contains any sites, apply the
 ## After login check
 
 1. Read $JOB_SEARCH_TRACKER — find first `resume_ready` or `blocked` entry
-2. Write round_1.json for that job
+2. Write round_1.json for that job (navigate + wait only)
 3. Run: ~/voracle-env/bin/python3 {RUNNER_SCRIPT} round_1.json
-4. Read JSON stdout → plan next round → run it
-5. Repeat until applied/blocked/error → next job
+4. **Check round 1 result immediately:**
+   - `page.is_generic_page = true` → update tracker to `wrong_url`, add `{{"type":"close_tab"}}` as next action, skip to next job
+   - `page.is_not_found = true` → update tracker to `expired`, add `{{"type":"close_tab"}}` as next action, skip to next job
+   - `page.has_login = true` → apply Login wall strategy before proceeding
+5. Read JSON stdout → plan next round → run it
+6. Repeat until applied/blocked/error → next job
 
 ## Login wall strategy
 
@@ -189,6 +193,40 @@ Output: JSON on stdout
 | wait_human_login  | reason, timeout_s*       | wait for manual login; if user doesn't log in within timeout (default from $LOGIN_HUMAN_TIMEOUT), returns status=timeout+auto_proceed=true so you can try Forgot Password |
 | fetch_email_code  | email, provider*, timeout_s* | open Gmail/Outlook tab, find OTP or reset link, close tab; result has `link` (URL) or `code` (OTP) |
 | evaluate          | expression               | run JS, result returned |
+
+## CSS selector rules
+
+- **Never use an ID selector that starts with a digit** — `#5abc` is invalid CSS. Use attribute selector instead: `[id='5abc']`
+- Prefer `[name=...]`, `[type=...]`, `[aria-label=...]`, `:has-text(...)` over bare `#id` selectors
+- If a selector causes a `querySelectorAll SyntaxError`, replace it with an attribute selector equivalent
+
+## Phone country code dropdowns
+
+When selecting a country code (e.g. +1 for US):
+- Use `label` not `value` to avoid ambiguity — multiple countries share +1
+- Use `{{"type": "select", "selector": "...", "label": "United States"}}` (not "United States Minor Outlying Islands")
+- If the dropdown uses a custom UI (not a native `<select>`), use `type` action to type "United States" then click the matching option
+
+## evaluate action rules
+
+- **Never use `getEventListeners`** — it only works in Chrome DevTools, not in `evaluate`. Use `document.querySelector` and standard DOM APIs instead.
+- Always null-check before accessing properties: `const el = document.querySelector(...); if (el) {{ el.checked = true; }}`
+
+## Round numbering rules
+
+- Round numbers MUST increment: round 1, 2, 3, … — **never repeat the same round number**.
+- If round N fails, the next file must be round N+1, not another round N.
+- If you cannot make progress after 5 rounds on the same page, mark as `blocked` and move on.
+- Hard limit: the runner will abort after 4 runs of the same round number.
+
+## Tab management rules
+
+- **Never create a fake job_id like `xyz_close` with round 99 just to close a tab.** That is not a valid pattern.
+- Tab lifecycle:
+  - `applied` → runner auto-updates tracker to `applied` + closes tab ✓ (you don't need to do anything)
+  - `wrong_url` / `expired` → include `{{"type":"close_tab"}}` as the last action before moving on
+  - `blocked` / `error` → leave tab open so the user can act on it manually
+- Each new job automatically opens a new tab (round 1 always opens fresh).
 
 ## Runner output
 

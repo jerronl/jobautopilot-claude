@@ -30,6 +30,7 @@ _USER_DATA_DIR = _SHARED_STATE / "user_data"   # persistent cookies / login stat
 
 # Progress log — tailed by orchestrator for real-time display
 _PROGRESS_LOG = Path(os.environ.get("RESUME_OUTPUT_DIR", "/tmp")) / "state" / "submit_progress.log"
+_TRACKER_PATH = os.environ.get("TRACKER_PATH", "")
 
 
 def _log_progress(msg: str) -> None:
@@ -41,6 +42,43 @@ def _log_progress(msg: str) -> None:
         with open(_PROGRESS_LOG, "a") as f:
             f.write(f"{ts} 📨 {msg}\n")
     except OSError:
+        pass
+
+
+def _mark_applied(job_id: str) -> None:
+    """Update the tracker row for job_id to 'applied'."""
+    import re, datetime
+    if not _TRACKER_PATH:
+        return
+    try:
+        tracker = Path(_TRACKER_PATH)
+        if not tracker.exists():
+            return
+        text = tracker.read_text()
+        today = datetime.date.today().isoformat()
+        # Match any row that contains the job_id slug in the Notes column
+        # and has status resume_ready or blocked — replace with applied
+        slug = job_id.replace("_", " ").lower()
+        lines = text.splitlines()
+        changed = False
+        for i, line in enumerate(lines):
+            if "| resume_ready |" not in line and "| blocked |" not in line:
+                continue
+            # Rough match: job_id slug words appear somewhere in the row
+            words = [w for w in slug.split() if len(w) > 3]
+            if not words or not any(w in line.lower() for w in words):
+                continue
+            lines[i] = re.sub(r'\|\s*(resume_ready|blocked)\s*\|',
+                               f'| applied |', line, count=1)
+            # Append applied date to Notes
+            lines[i] = re.sub(r'(\|\s*applied\s*\|)([^|]*)\|',
+                               lambda m: m.group(1) + m.group(2).rstrip()
+                               + f' Applied {today}.|', lines[i], count=1)
+            changed = True
+            break
+        if changed:
+            tracker.write_text("\n".join(lines) + "\n")
+    except Exception:
         pass
 
 
@@ -120,6 +158,29 @@ ROUND             = spec.get("round", 1)
 JOB_ID            = spec.get("job_id", "unknown")
 BROWSER_STATE_DIR = spec.get("browser_state_dir", f"/tmp/submit_state_{JOB_ID}")
 ACTIONS           = spec.get("actions", [])
+
+# Guard: detect if the same round number has been run too many times for this job.
+# The agent sometimes rewrites round_1.json repeatedly — cap it to avoid infinite loops.
+_MAX_SAME_ROUND = 4
+_round_count_file = Path(BROWSER_STATE_DIR) / f".round_{ROUND}_count"
+try:
+    Path(BROWSER_STATE_DIR).mkdir(parents=True, exist_ok=True)
+    _count = int(_round_count_file.read_text()) if _round_count_file.exists() else 0
+    _count += 1
+    _round_count_file.write_text(str(_count))
+    if _count > _MAX_SAME_ROUND:
+        _log_progress(f"✗ {JOB_ID} — round {ROUND} repeated {_count}x, marking blocked")
+        print(json.dumps({
+            "round": ROUND, "job_id": JOB_ID, "results": [],
+            "page": {"url": "", "title": "", "interactive": [], "text": "",
+                     "confirmed": False, "has_captcha": False, "has_login": False,
+                     "is_generic_page": False, "is_not_found": False},
+            "needs_login": [],
+            "error": f"round {ROUND} repeated {_count} times — aborting to prevent infinite loop",
+        }, ensure_ascii=False))
+        sys.exit(1)
+except Exception:
+    pass
 
 _log_progress(f"→ {JOB_ID}  round {ROUND}  ({len(ACTIONS)} actions)")
 
@@ -216,16 +277,47 @@ async def capture_page_state(page) -> dict:
     captcha_phrases = ["captcha", "robot", "challenge", "cf-challenge", "verify you"]
     login_phrases   = ["sign in", "log in", "login", "create an account", "sign up",
                         "forgot password", "reset password", "register"]
+    # Generic career page: many listings, no specific job
+    generic_phrases = [
+        "search jobs", "job search", "browse jobs", "find your next role",
+        "all open positions", "view all jobs", "explore careers", "explore opportunities",
+        "job listings", "career opportunities", "open roles", "current openings",
+        "jobs at ", "careers at ", "join our team",
+    ]
+    # Job no longer available
+    not_found_phrases = [
+        "job not found", "position has been filled", "no longer available",
+        "this job has expired", "job has been removed", "posting expired",
+        "this position is no longer", "page not found", "404 not found",
+        "job posting is closed", "this role has been filled",
+    ]
+
+    url_lower = page.url.lower()
+    # URL looks generic if it ends at /careers or /jobs with no further path segment
+    import re as _re
+    url_is_generic = bool(_re.search(r'/(careers|jobs|openings|opportunities)/?$', url_lower))
+
+    is_generic_page = (
+        url_is_generic
+        or any(p in body_lower for p in generic_phrases)
+        or (len(interactive) > 5 and all(
+            i.get("tag") not in ("BUTTON", "A") for i in interactive
+            if "apply" in str(i).lower()
+        ))
+    )
+    is_not_found = any(p in body_lower for p in not_found_phrases)
 
     return {
-        "url":         page.url,
-        "title":       await page.title(),
-        "interactive": interactive,
-        "text":        body_text[:1000],
-        "confirmed":   any(p in body_lower for p in confirmed_phrases),
-        "has_captcha": any(p in body_lower for p in captcha_phrases),
-        "has_login":   (any(p in body_lower for p in login_phrases)
-                        or any(p in page.url.lower() for p in ["/login", "/signin", "/sign-in", "/auth", "authgateway"])),
+        "url":            page.url,
+        "title":          await page.title(),
+        "interactive":    interactive,
+        "text":           body_text[:1000],
+        "confirmed":      any(p in body_lower for p in confirmed_phrases),
+        "has_captcha":    any(p in body_lower for p in captcha_phrases),
+        "has_login":      (any(p in body_lower for p in login_phrases)
+                           or any(p in url_lower for p in ["/login", "/signin", "/sign-in", "/auth", "authgateway"])),
+        "is_generic_page": is_generic_page,
+        "is_not_found":   is_not_found,
     }
 
 
@@ -513,9 +605,14 @@ async def main():
     async with async_playwright() as p:
         browser = await _get_browser(p)
 
-        # Reuse existing page or open a new tab
-        pages = browser.contexts[0].pages if browser.contexts else []
-        page  = pages[-1] if pages else await browser.contexts[0].new_page() if browser.contexts else await (await browser.new_context()).new_page()
+        # Round 1 always opens a fresh tab so the previous job's page stays visible.
+        # Subsequent rounds reuse the current tab (last open page for this job).
+        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        if ROUND == 1:
+            page = await ctx.new_page()
+        else:
+            pages = ctx.pages
+            page  = pages[-1] if pages else await ctx.new_page()
 
         results = []
         for action in ACTIONS:
@@ -543,6 +640,16 @@ async def main():
             pass
 
         page_state = await capture_page_state(page)
+
+        # On confirmed submission: update tracker + close tab
+        if page_state.get("confirmed"):
+            _mark_applied(JOB_ID)
+            try:
+                all_pages = [pg for ctx in browser.contexts for pg in ctx.pages]
+                if len(all_pages) > 1:
+                    await page.close()
+            except Exception:
+                pass
 
         # Log round result for real-time visibility
         if page_state.get("confirmed"):
