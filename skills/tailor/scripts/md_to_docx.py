@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
-md_to_docx_v2.py — Fill a resume DOCX template from a Markdown file.
+md_to_docx.py — Fill a resume DOCX template from a Markdown file.
 
+Version: 1.1
 Dependencies:  pip install python-docx
 
 Usage:
-    python3 md_to_docx_v2.py <input.md> <template.docx> <output.docx>
+    python3 md_to_docx.py <input.md> <template.docx> <output.docx>
 
 Template placeholders expected:
     {{NAME}}, {{CONTACT}}, {{SUMMARY_BODY}}, {{SKILLS_BODY}}
-    {{SEC1_TITLE}} … {{SEC5_TITLE}}
+    {{SEC1_TITLE}} … {{SEC6_TITLE}}
     {{JOBn_TITLE}}, {{JOBn_LOC}}, {{JOBn_DATE}}, {{JOBn_BULLETm}}
+    {{PROJn_TITLE}}, {{PROJn_BULLETm}}
     {{EARLY_EXPn}}
     {{UNIVn}}, {{DEGREEn}}
 
 Behaviour:
     • Fewer MD jobs than template slots  → removes extra job paragraphs
     • More MD jobs than template slots   → clones last job's formatting
-    • Same logic for bullets, early-exp lines, education lines
+    • Same logic for bullets, projects, early-exp lines, education lines
+    • PROJECTS is optional: if MD has no PROJECTS section, all PROJn_* and
+      {{SEC6_TITLE}} placeholders are removed from the docx.
 """
 
 import re, sys, copy
@@ -74,6 +78,22 @@ def parse_md(text: str) -> dict:
     if cur_job:
         jobs.append(cur_job)
 
+    # Projects (optional)
+    projects, cur_proj = [], None
+    for line in sections.get("PROJECTS", []):
+        s = line.strip()
+        if not s:
+            continue
+        if re.match(r'^[•\-]', s):
+            if cur_proj is not None:
+                cur_proj["bullets"].append(re.sub(r'^[•\-–\s]+', '', s).strip())
+        else:
+            if cur_proj is not None:
+                projects.append(cur_proj)
+            cur_proj = dict(name=s, bullets=[])
+    if cur_proj is not None:
+        projects.append(cur_proj)
+
     # Earlier experience
     early_exps = []
     for k, v in sections.items():
@@ -96,7 +116,8 @@ def parse_md(text: str) -> dict:
 
     return dict(name=name, contact=contact,
                 summary=sec("SUMMARY"), skills=sec("CORE SKILLS"),
-                jobs=jobs, early_exps=early_exps, education=education)
+                jobs=jobs, projects=projects,
+                early_exps=early_exps, education=education)
 
 # ── paragraph helpers ─────────────────────────────────────────────────────────
 
@@ -260,10 +281,62 @@ def collect_job_indices(paras, job_n: int) -> dict:
         b += 1
     return dict(header=header_idx, bullets=bullets)
 
+def collect_proj_indices(paras, proj_n: int) -> dict:
+    """
+    Return dict with keys: 'header', 'bullets' (list of indices)
+    for project number proj_n.
+    """
+    header_idx = find_para_with(paras, f'{{{{PROJ{proj_n}_TITLE}}}}')
+    if header_idx is None:
+        return None
+    bullets = []
+    b = 1
+    while True:
+        idx = find_para_with(paras, f'{{{{PROJ{proj_n}_BULLET{b}}}}}')
+        if idx is None:
+            break
+        bullets.append(idx)
+        b += 1
+    return dict(header=header_idx, bullets=bullets)
+
 # ── main fill logic ───────────────────────────────────────────────────────────
 
 def fill_template(doc: Document, data: dict):
     paras = doc.paragraphs  # live list (reflects structural changes)
+
+    # ── Projects: if MD has none, strip all PROJ* placeholders + SEC6 title ────
+    # This must run BEFORE the simple substitutions so SEC6_TITLE can be removed.
+    if not data['projects']:
+        # Remove all PROJn project blocks
+        proj_n = 1
+        while True:
+            info = collect_proj_indices(doc.paragraphs, proj_n)
+            if info is None:
+                break
+            for bullet_idx in reversed(info['bullets']):
+                remove_paragraph(doc.paragraphs[bullet_idx])
+            # Re-fetch header index after bullet removals
+            info = collect_proj_indices(doc.paragraphs, proj_n)
+            if info is not None:
+                remove_paragraph(doc.paragraphs[info['header']])
+            proj_n += 1
+        # Remove the table that holds {{SEC6_TITLE}} (section titles live in
+        # their own one-cell tables in this template).
+        for table in list(doc.tables):
+            found = False
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        if '{{SEC6_TITLE}}' in p.text:
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+            if found:
+                table._element.getparent().remove(table._element)
+                break
 
     # ── Simple single-value substitutions ─────────────────────────────────────
     simple = {
@@ -277,6 +350,8 @@ def fill_template(doc: Document, data: dict):
         '{{SEC4_TITLE}}':   'EARLIER EXPERIENCE',
         '{{SEC5_TITLE}}':   'EDUCATION',
     }
+    if data['projects']:
+        simple['{{SEC6_TITLE}}'] = 'PROJECTS'
     # Collect all paragraphs: body paragraphs + table cell paragraphs
     all_paras = list(doc.paragraphs)
     for table in doc.tables:
@@ -364,6 +439,68 @@ def fill_template(doc: Document, data: dict):
             for bullet_text in reversed(job['bullets']):
                 cur_anchor = clone_paragraph_after(cur_anchor, bullet_text)
             clone_job_header_after(anchor, job['title'], job['loc'], job['date'])
+
+    # ── Projects ───────────────────────────────────────────────────────────────
+    # Only runs when data['projects'] is non-empty (empty case stripped above).
+    md_projs = data['projects']
+    if md_projs:
+        tpl_projs = 0
+        while find_para_with(doc.paragraphs, f'{{{{PROJ{tpl_projs+1}_TITLE}}}}') is not None:
+            tpl_projs += 1
+
+        fill_projs = min(tpl_projs, len(md_projs))
+
+        # Step A: fill slots that exist in both
+        for i in range(1, fill_projs + 1):
+            proj = md_projs[i - 1]
+            info = collect_proj_indices(doc.paragraphs, i)
+            tpl_b = len(info['bullets'])
+            md_b = proj['bullets']
+
+            # Extra bullets: clone last bullet para
+            if len(md_b) > tpl_b and tpl_b > 0:
+                last_bullet_para = doc.paragraphs[info['bullets'][-1]]
+                for extra_text in reversed(md_b[tpl_b:]):
+                    clone_paragraph_after(last_bullet_para, extra_text)
+
+            # Remove excess template bullet slots (in reverse)
+            info = collect_proj_indices(doc.paragraphs, i)
+            while len(info['bullets']) > len(md_b):
+                remove_paragraph(doc.paragraphs[info['bullets'][-1]])
+                info = collect_proj_indices(doc.paragraphs, i)
+
+            # Fill remaining bullet slots
+            info = collect_proj_indices(doc.paragraphs, i)
+            for b_i, bullet_idx in enumerate(info['bullets']):
+                set_para_text_preserve_runs(doc.paragraphs[bullet_idx], md_b[b_i])
+
+            # Fill header (single field — project name)
+            info = collect_proj_indices(doc.paragraphs, i)
+            set_para_text_preserve_runs(doc.paragraphs[info['header']], proj['name'])
+
+        # Step B: remove extra template project slots
+        for i in range(fill_projs + 1, tpl_projs + 1):
+            info = collect_proj_indices(doc.paragraphs, i)
+            if info is None:
+                continue
+            for bullet_idx in reversed(info['bullets']):
+                remove_paragraph(doc.paragraphs[bullet_idx])
+            info = collect_proj_indices(doc.paragraphs, i)
+            if info is not None:
+                remove_paragraph(doc.paragraphs[info['header']])
+
+        # Step C: extra MD projects (more than template slots)
+        if len(md_projs) > tpl_projs and tpl_projs > 0:
+            info_last = collect_proj_indices(doc.paragraphs, tpl_projs)
+            if info_last:
+                anchor = (doc.paragraphs[info_last['bullets'][-1]]
+                          if info_last['bullets']
+                          else doc.paragraphs[info_last['header']])
+                for proj in reversed(md_projs[tpl_projs:]):
+                    cur_anchor = anchor
+                    for bullet_text in reversed(proj['bullets']):
+                        cur_anchor = clone_paragraph_after(cur_anchor, bullet_text)
+                    clone_paragraph_after(anchor, proj['name'], bold=True)
 
     # ── Earlier experience ─────────────────────────────────────────────────────
     early = data['early_exps']

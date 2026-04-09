@@ -106,6 +106,12 @@ Default target is 30 if the env var is unset.
 
 Use the browser tool with profile `search`. Search LinkedIn Jobs as the primary source. Also search company career pages for target employers when useful.
 
+### Tab hygiene
+
+Do not let tabs accumulate. If more than **10 tabs** are open at any point,
+close the **5 oldest** (excluding whatever tab you're actively reading) before
+starting the next search. Use your browser tool's list/close primitives.
+
 Keyword combinations to try (mix and match from config):
 
 ```

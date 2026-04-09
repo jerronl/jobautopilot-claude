@@ -24,7 +24,7 @@ async def main():
     from jobautopilot_claude.cli import _parse_args, _read_config_value, _write_config_value, DEFAULT_SHORTLIST_TARGET
     import os
 
-    headed, shortlist_target, prompt = _parse_args(sys.argv[1:])
+    headed, shortlist_target, login_timeout, prompt = _parse_args(sys.argv[1:])
 
     if not prompt:
         print(__doc__)

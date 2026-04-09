@@ -132,12 +132,43 @@ Then in the next round:
 
 If `result.status = "code_not_found"`, add `wait_human` asking the user to check their email manually.
 
-## EEOC fields
+## Pre-set answers from env (EEOC + screening questions)
 
-Read from env: `$USER_GENDER`, `$USER_RACE`, `$USER_HISPANIC`, `$USER_VETERAN`,
-`$USER_DISABILITY`, `$USER_WORK_AUTH`, `$USER_NEED_SPONSOR`.
+These env vars hold pre-approved answers. **Whenever you see an application question that matches one of the patterns below, fill from env — do NOT skip and do NOT ask the user.** Only fall back to `wait_human` if the env var is unset.
 
-Use `select` action with `label` field for dropdowns. If env var is empty → skip.
+| Env var | Use for question text containing | Typical value |
+|---|---|---|
+| `$USER_GENDER` | "gender", "what is your gender" | Male / Female / Prefer not to say |
+| `$USER_RACE` | "race", "ethnicity" | Asian / White / ... |
+| `$USER_HISPANIC` | "hispanic", "latino" | Yes / No |
+| `$USER_VETERAN` | "veteran", "military service", "protected veteran" | I have no military service / ... |
+| `$USER_DISABILITY` | "disability", "disabled" | Yes / No / Prefer not to say |
+| `$USER_WORK_AUTH` | "legally authorized to work", "right to work", "work authorization" | Yes / No |
+| `$USER_NEED_SPONSOR` | "require visa sponsorship", "need sponsorship", "now or in the future" | Yes / No |
+| `$USER_NON_COMPETE` | "non-compete", "noncompete", "restrictive covenant" | Yes / No |
+
+Fill rule: native `<select>` → `select` with `label`; radio group → `click` the matching label; checkbox → `click`.
+
+### Default-No screening questions
+
+For Yes/No questions about sanctioned countries, criminal/legal disclosures, or relatives at the company that have no env var, default to **No** unless told otherwise. Examples:
+- "Are you a national of Cuba/Iran/North Korea/Syria?" → No
+- "Are you living in Cuba/Iran/North Korea/Crimea/Donetsk/Luhansk?" → No
+- "Have you previously been employed by [company]?" → No (unless work history shows it)
+- "Do you have relatives employed by [company]?" → No
+- "Are you a referral of a client/vendor/government official?" → No
+
+### Discovery-source / "How did you hear about this job?"
+
+The tracker's Notes column for the current job contains "Found on YYYY-MM-DD via X". Extract `X` (e.g. "Tech:NYC", "LinkedIn", "Indeed", "Bloomberg careers"). Match against the dropdown options:
+
+- "Tech:NYC" / "jobs.technyc.org" → "Job Board" / "Other Job Board" / "Tech:NYC" if listed
+- "LinkedIn" → "LinkedIn"
+- "Indeed" → "Indeed"
+- "Company website" / "X careers" → "Company Website"
+- Anything else → "Other" / "Other Job Board"
+
+If no option matches and "Other" exists, pick "Other".
 
 ## Cover letter
 

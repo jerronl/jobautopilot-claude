@@ -312,6 +312,13 @@ Rules:
 - One line per job — no multi-line blocks between jobs
 - Stage icons: 🎬 Orchestrator · 🔍 Search · ✂️ Tailor · 📨 Submitter — use these everywhere, never 📄 for tailor
 
+## User overrides — listen to the user
+
+If the user's prompt explicitly limits scope (e.g. "search only", "do not run submitter",
+"skip tailor", "only tailor today"), HONOR it for this run. Skip the disabled stages
+even if the tracker has work for them. The default parallel-pipeline behavior applies
+only when the user gives a generic prompt with no scope restriction.
+
 ## Critical rules — do NOT violate
 
 - **Never check the filesystem yourself to decide whether tailoring is needed.** If the tracker has `shortlist` entries, invoke the resume-tailor subagent — always. Do not inspect `$RESUME_OUTPUT_DIR` or determine that files "already exist". That is the tailor agent's job.
@@ -353,6 +360,7 @@ async def run(prompt: str, stream: bool = True, headed: bool = True) -> str:
         "USER_DISABILITY":  os.environ.get("USER_DISABILITY", ""),
         "USER_WORK_AUTH":   os.environ.get("USER_WORK_AUTH", ""),
         "USER_NEED_SPONSOR": os.environ.get("USER_NEED_SPONSOR", ""),
+        "USER_NON_COMPETE": os.environ.get("USER_NON_COMPETE", ""),
     })
 
     # Resolve login timeout: CLI override > tracker > default

@@ -312,6 +312,7 @@ USER_VETERAN=$(ask "Veteran status" "${USER_VETERAN:-I have no military service}
 USER_DISABILITY=$(ask "Disability status" "${USER_DISABILITY:-No}")
 USER_WORK_AUTH=$(ask "Authorized to work in US? (Yes/No)" "${USER_WORK_AUTH:-Yes}")
 USER_NEED_SPONSOR=$(ask "Require visa sponsorship? (Yes/No)" "${USER_NEED_SPONSOR:-No}")
+USER_NON_COMPETE=$(ask "Bound by a non-compete agreement? (Yes/No)" "${USER_NON_COMPETE:-No}")
 echo ""
 
 # ── Write config ──────────────────────────────────────────────────────
@@ -355,6 +356,7 @@ export USER_VETERAN="$USER_VETERAN"
 export USER_DISABILITY="$USER_DISABILITY"
 export USER_WORK_AUTH="$USER_WORK_AUTH"
 export USER_NEED_SPONSOR="$USER_NEED_SPONSOR"
+export USER_NON_COMPETE="$USER_NON_COMPETE"
 EOF
 chmod 600 "$CONFIG_FILE"
 

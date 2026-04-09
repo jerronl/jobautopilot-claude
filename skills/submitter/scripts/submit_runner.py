@@ -20,6 +20,7 @@ Exit codes:
     2 — fatal error
 """
 import asyncio, json, os, shutil, socket, subprocess, sys, time
+os.environ.setdefault("NODE_NO_WARNINGS", "1")
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
@@ -89,21 +90,61 @@ def _find_free_port() -> int:
 
 
 def _chromium_exe() -> str:
+    # Prefer playwright's own chromium (most compatible with CDP)
+    import glob
+    for pattern in [
+        str(Path.home() / ".cache/ms-playwright/chromium-*/chrome-linux64/chrome"),
+        str(Path.home() / ".cache/ms-playwright/chromium-*/chrome-linux/chrome"),
+    ]:
+        hits = sorted(glob.glob(pattern), reverse=True)
+        if hits:
+            return hits[0]
     for candidate in [
         shutil.which("chromium-browser"),
-        shutil.which("chromium"),
         shutil.which("google-chrome"),
-        # playwright's own chromium
-        str(Path.home() / ".cache/ms-playwright/chromium-*/chrome-linux/chrome"),
+        shutil.which("chromium"),
     ]:
         if candidate and Path(candidate).exists():
             return candidate
-    # fallback: let playwright find it
-    import glob
-    hits = glob.glob(str(Path.home() / ".cache/ms-playwright/chromium-*/chrome-linux/chrome"))
-    if hits:
-        return hits[0]
     raise RuntimeError("Chromium not found")
+
+
+async def _gc_tabs(browser, threshold=10, close_n=5):
+    """If context has more than `threshold` tabs, close the `close_n` oldest.
+    Protects about:blank placeholder and any tab matching a currently-held
+    job hint URL (i.e. an active submit target)."""
+    try:
+        ctx = browser.contexts[0] if browser.contexts else None
+        if ctx is None:
+            return
+        pages = list(ctx.pages)
+        if len(pages) <= threshold:
+            return
+        # Collect active hint URLs from all job state dirs
+        hints = set()
+        try:
+            state_root = _SHARED_STATE.parent  # .../state
+            for f in state_root.glob("*/tab_url.txt"):
+                hints.add(f.read_text().strip())
+        except Exception:
+            pass
+        from urllib.parse import urlparse
+        hint_hosts = {urlparse(h).netloc for h in hints if h}
+        closed = 0
+        for pg in pages:   # pages[0] is oldest
+            if closed >= close_n:
+                break
+            try:
+                if urlparse(pg.url).netloc in hint_hosts:
+                    continue  # protect active job tabs
+                await pg.close()
+                closed += 1
+            except Exception:
+                pass
+        if closed:
+            _log(f"tab-gc: closed {closed} old tabs ({len(pages)}→{len(ctx.pages)})")
+    except Exception as e:
+        _log(f"tab-gc error: {e}")
 
 
 async def _get_browser(p):
@@ -114,8 +155,9 @@ async def _get_browser(p):
     if _CDP_PORT_FILE.exists():
         port = _CDP_PORT_FILE.read_text().strip()
         try:
-            browser = await p.chromium.connect_over_cdp(f"http://localhost:{port}")
+            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             _log(f"reconnected to browser on port {port}")
+            await _gc_tabs(browser)
             return browser
         except Exception:
             _log(f"browser on port {port} gone — relaunching")
@@ -141,8 +183,8 @@ async def _get_browser(p):
     )
     _CDP_PORT_FILE.write_text(port)
     _log(f"launched browser on port {port}, waiting for CDP...")
-    await asyncio.sleep(2)        # give Chromium time to start
-    browser = await p.chromium.connect_over_cdp(f"http://localhost:{port}")
+    await asyncio.sleep(5)        # give Chromium time to start
+    browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
     _log("connected")
     return browser
 
@@ -229,9 +271,14 @@ async def capture_page_state(page) -> dict:
         interactive = await page.evaluate("""() => {
             const out = [];
             document.querySelectorAll(
-                'input:not([type=hidden]), select, textarea, button, [role="button"], label'
+                'input:not([type=hidden]), select, textarea, button, [role="button"], label, a[href]'
             ).forEach(el => {
                 const vis = el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0;
+                // Filter noise: skip invisible anchors that are clearly nav/footer.
+                if (el.tagName === 'A' && !vis) {
+                    const cls = (el.className || '').toString().toLowerCase();
+                    if (/footer|menu__link|nav|header/.test(cls)) return;
+                }
                 out.push({
                     tag:         el.tagName,
                     type:        el.type || '',
@@ -277,13 +324,6 @@ async def capture_page_state(page) -> dict:
     captcha_phrases = ["captcha", "robot", "challenge", "cf-challenge", "verify you"]
     login_phrases   = ["sign in", "log in", "login", "create an account", "sign up",
                         "forgot password", "reset password", "register"]
-    # Generic career page: many listings, no specific job
-    generic_phrases = [
-        "search jobs", "job search", "browse jobs", "find your next role",
-        "all open positions", "view all jobs", "explore careers", "explore opportunities",
-        "job listings", "career opportunities", "open roles", "current openings",
-        "jobs at ", "careers at ", "join our team",
-    ]
     # Job no longer available
     not_found_phrases = [
         "job not found", "position has been filled", "no longer available",
@@ -291,31 +331,50 @@ async def capture_page_state(page) -> dict:
         "this position is no longer", "page not found", "404 not found",
         "job posting is closed", "this role has been filled",
     ]
+    # Words that, when present in the page <title>, mean the page is showing a
+    # specific job posting (not a generic listing).
+    role_keywords = [
+        "engineer", "developer", "scientist", "analyst", "manager", "director",
+        "lead", "architect", "researcher", "specialist", "consultant", "designer",
+        "associate", "vice president", " vp", "head of", "principal",
+        "quant", "trader", "strategist", "intern", "officer",
+    ]
+    # Title patterns that strongly indicate a generic listing / hub page.
+    generic_title_patterns = [
+        "jobs", "careers", "open positions", "openings", "job search",
+        "search results", "all jobs", "find a job",
+    ]
 
-    url_lower = page.url.lower()
-    # URL looks generic if it ends at /careers or /jobs with no further path segment
+    url_lower   = page.url.lower()
+    title       = await page.title()
+    title_lower = title.lower()
+
+    # URL looks generic if it ends at /careers or /jobs with no further segment
     import re as _re
     url_is_generic = bool(_re.search(r'/(careers|jobs|openings|opportunities)/?$', url_lower))
 
-    is_generic_page = (
-        url_is_generic
-        or any(p in body_lower for p in generic_phrases)
-        or (len(interactive) > 5 and all(
-            i.get("tag") not in ("BUTTON", "A") for i in interactive
-            if "apply" in str(i).lower()
-        ))
-    )
-    is_not_found = any(p in body_lower for p in not_found_phrases)
+    title_has_role    = any(kw in title_lower for kw in role_keywords)
+    title_is_generic  = (not title_has_role
+                         and any(p in title_lower for p in generic_title_patterns))
+
+    is_generic_page = url_is_generic or title_is_generic
+    is_not_found = (any(p in body_lower for p in not_found_phrases)
+                    or title_lower.startswith("error ")
+                    or title_lower.endswith(" error")
+                    or " | error" in title_lower)
 
     return {
         "url":            page.url,
-        "title":          await page.title(),
+        "title":          title,
         "interactive":    interactive,
         "text":           body_text[:1000],
         "confirmed":      any(p in body_lower for p in confirmed_phrases),
         "has_captcha":    any(p in body_lower for p in captcha_phrases),
-        "has_login":      (any(p in body_lower for p in login_phrases)
-                           or any(p in url_lower for p in ["/login", "/signin", "/sign-in", "/auth", "authgateway"])),
+        # URL-only login detection. Body-text phrases ("sign in", "create account")
+        # are false positives on Workday/Oracle apply forms, which always render those
+        # strings in headers even when the candidate is already logged in and filling
+        # the form. Only flag login when the URL path itself is a login route.
+        "has_login":      any(p in url_lower for p in ["/login", "/signin", "/sign-in", "/authgateway", "/account/login"]),
         "is_generic_page": is_generic_page,
         "is_not_found":   is_not_found,
     }
@@ -354,32 +413,104 @@ async def exec_action(page, action: dict) -> dict:
         elif t == "select":
             sel = action["selector"]
             el  = page.locator(sel).first
-            if await el.count() > 0:
-                await el.select_option(value=action.get("value", ""),
-                                       label=action.get("label", None))
-                res["status"] = "ok"
-            else:
+            if await el.count() == 0:
                 res["status"] = "not_found"
+            else:
+                want_label = action.get("label", None)
+                want_value = action.get("value", "")
+                # First try Playwright's native select_option
+                try:
+                    await el.select_option(value=want_value, label=want_label)
+                except Exception as e:
+                    # Will retry via JS fallback below
+                    res["error"] = f"select_option threw: {e}"
+                # Verify it actually took effect — Select2 wrappers, hidden
+                # selects, and aria-hidden elements often cause select_option
+                # to succeed silently without changing selectedIndex.
+                _verify_js = """(el, want) => {
+  if (el.tagName !== 'SELECT') return {ok:false,reason:'not a select'};
+  if (el.selectedIndex > 0) {
+    const opt = el.options[el.selectedIndex];
+    if (want.label && opt.text !== want.label) return {ok:false,reason:'wrong label',got:opt.text};
+    if (want.value && opt.value !== String(want.value)) return {ok:false,reason:'wrong value',got:opt.value};
+    return {ok:true,value:opt.value,text:opt.text};
+  }
+  let opt = null;
+  if (want.label) opt = Array.from(el.options).find(o => o.text === want.label);
+  if (!opt && want.value) opt = Array.from(el.options).find(o => o.value === String(want.value));
+  if (!opt) return {ok:false,reason:'option not in DOM'};
+  el.value = opt.value;
+  el.dispatchEvent(new Event('change',{bubbles:true}));
+  if (window.jQuery && window.jQuery(el).data('select2')) window.jQuery(el).trigger('change');
+  return el.selectedIndex > 0 ? {ok:true,value:opt.value,text:opt.text,via:'js'} : {ok:false,reason:'js set failed'};
+}"""
+                try:
+                    state = await el.evaluate(_verify_js, {"label": want_label, "value": want_value})
+                except Exception as e:
+                    state = {"ok": False, "reason": f"verify threw: {e}"}
+                if state.get("ok"):
+                    res["status"] = "ok"
+                    res["selected"] = {"text": state.get("text"), "value": state.get("value")}
+                    if state.get("via"): res["via"] = state["via"]
+                    res.pop("error", None)
+                else:
+                    res["status"] = "error"
+                    res["error"] = f"select did not take effect: {state.get('reason')}; got={state.get('got','')}"
 
         elif t == "click":
-            sel = action["selector"]
-            el  = page.locator(sel).first
+            sel    = action["selector"]
+            iframe = action.get("iframe")  # optional CSS selector for an iframe
+            if iframe:
+                # Click an element inside a (possibly cross-origin) iframe.
+                el = page.frame_locator(iframe).locator(sel).first
+            else:
+                el = page.locator(sel).first
             if await el.count() > 0:
-                await el.scroll_into_view_if_needed()
+                try:
+                    await el.scroll_into_view_if_needed()
+                except Exception:
+                    pass  # frame_locator elements may not support this
                 await el.click()
                 res["status"] = "ok"
             else:
                 res["status"] = "not_found"
 
         elif t == "upload":
-            sel   = action["selector"]
+            # Two modes:
+            #   1. Direct: set files on the <input type=file> via `selector`.
+            #   2. Via trigger: click `click_selector` inside expect_file_chooser,
+            #      then provide files through the chooser event. Use this when the
+            #      real input is hidden behind a "Choose File" button that opens
+            #      the OS picker on click.
             paths = action.get("paths") or [action.get("path")]
-            el    = page.locator(sel).first
-            if await el.count() > 0:
-                await el.set_input_files([p for p in paths if p and Path(p).exists()])
-                res["status"] = "ok"
+            valid_paths = [p for p in paths if p and Path(p).exists()]
+            click_sel = action.get("click_selector")
+            if click_sel:
+                trigger = page.locator(click_sel).first
+                if await trigger.count() == 0:
+                    res["status"] = "not_found"
+                else:
+                    try:
+                        async with page.expect_file_chooser(timeout=10000) as fc_info:
+                            await trigger.click()
+                        chooser = await fc_info.value
+                        await chooser.set_files(valid_paths)
+                        res["status"] = "ok"
+                    except PWTimeout:
+                        res["status"] = "timeout"
+                        res["error"]  = "click did not open a file chooser"
             else:
-                res["status"] = "not_found"
+                sel = action["selector"]
+                iframe_sel = action.get("iframe")
+                if iframe_sel:
+                    el = page.frame_locator(iframe_sel).locator(sel).first
+                else:
+                    el  = page.locator(sel).first
+                if await el.count() > 0:
+                    await el.set_input_files(valid_paths)
+                    res["status"] = "ok"
+                else:
+                    res["status"] = "not_found"
 
         elif t == "type":
             sel = action["selector"]
@@ -400,52 +531,24 @@ async def exec_action(page, action: dict) -> dict:
             res["result"] = result
 
         elif t == "check_login":
-            sel       = action.get("logged_in_selector", "")
-            site      = action.get("site", page.url)
-            login_url = action.get("login_url", "")
-            signup_url = action.get("signup_url", "")
-            logged_in = False
+            # Detection-only. Never blocks. Returns status=needs_login if not
+            # signed in — the agent decides what to do next (SSO click,
+            # wait_human_login, Forgot Password, etc.) via its decision tree.
+            sel        = action.get("logged_in_selector", "")
+            site       = action.get("site", page.url)
+            login_url  = action.get("login_url", "")
+            logged_in  = False
             if sel:
                 try:
                     logged_in = await page.locator(sel).count() > 0
                 except Exception:
                     pass
+            res["site"] = site
             if logged_in:
                 res["status"] = "already_logged_in"
-                res["site"]   = site
             else:
-                _alert(f"Login needed for {site}")
-                choice = _ask(
-                    f"Need to log in to {site}.",
-                    {
-                        "l": "I have an account — open login page",
-                        "c": "I need to create an account — open signup page",
-                        "s": "Skip this site for now",
-                    },
-                )
-                res["site"]   = site
-                if choice == "s":
-                    res["status"] = "skipped"
-                else:
-                    dest = login_url if choice == "l" else (signup_url or login_url)
-                    if dest:
-                        await page.goto(dest, wait_until="domcontentloaded")
-                    _log(f"Waiting for you to complete login/signup (up to 5 min)...")
-                    deadline = time.time() + 300
-                    while time.time() < deadline:
-                        await asyncio.sleep(5)
-                        try:
-                            if sel and await page.locator(sel).count() > 0:
-                                _log(f"  ✓ logged in to {site}")
-                                res["status"] = "logged_in"
-                                break
-                        except Exception:
-                            pass
-                        remaining = int(deadline - time.time())
-                        if remaining % 30 == 0:
-                            _log(f"  still waiting... {remaining}s left")
-                    else:
-                        res["status"] = "login_timeout"
+                res["status"]    = "needs_login"
+                res["login_url"] = login_url
 
         elif t == "fetch_email_code":
             # Open a new tab, go to webmail, search for recent verification email,
@@ -453,6 +556,10 @@ async def exec_action(page, action: dict) -> dict:
             email    = action.get("email", os.environ.get("USER_EMAIL", ""))
             provider = action.get("provider", "")   # "gmail" | "outlook" | auto-detect
             timeout  = action.get("timeout_s", 120) # wait up to N seconds for email to arrive
+            # Gmail search query to isolate the target email. Strongly recommended —
+            # without it the scanner sees the entire Gmail UI and picks up false positives.
+            # Examples: "from:bloomberg", "subject:reset", "from:noreply@workday.com newer_than:10m"
+            search_query = action.get("search_query", "newer_than:10m")
 
             # Auto-detect provider from email domain
             if not provider:
@@ -464,45 +571,103 @@ async def exec_action(page, action: dict) -> dict:
                 else:
                     provider = "gmail"  # fallback
 
+            # Per-provider config: inbox URL, sign-in host (means NOT signed in),
+            # and the provider's own domains to exclude when scanning for reset links.
+            from urllib.parse import quote as _q
             WEBMAIL = {
-                "gmail":   "https://mail.google.com/mail/u/0/#search/newer_than%3A10m",
-                "outlook": "https://outlook.live.com/mail/0/",
+                "gmail": {
+                    "url":         f"https://mail.google.com/mail/u/0/#search/{_q(search_query)}",
+                    "signin_host": "accounts.google.com",
+                    "own_domains": ("accounts.google.com", "mail.google.com"),
+                },
+                "outlook": {
+                    "url":         "https://outlook.live.com/mail/0/",
+                    "signin_host": "login.live.com",
+                    "own_domains": ("login.live.com", "outlook.live.com", "outlook.office.com"),
+                },
             }
-            url = WEBMAIL.get(provider, WEBMAIL["gmail"])
+            cfg = WEBMAIL.get(provider, WEBMAIL["gmail"])
+            url = cfg["url"]
 
             _log(f"Opening {provider} to fetch verification code or reset link...")
             original_page = page
-            ctx0 = browser.contexts[0] if browser.contexts else None
-            email_page = await ctx0.new_page() if ctx0 else await page.context.new_page()
+            ctx0 = page.context
+            email_page = await ctx0.new_page()
             await email_page.goto(url, wait_until="domcontentloaded")
             await asyncio.sleep(4)
+
+            # Detect if webmail is signed-in. If we're on accounts.google.com / login.live.com,
+            # the inbox isn't loaded — bail out instead of regex-matching the sign-in page.
+            cur_url = email_page.url.lower()
+            if cfg["signin_host"] in cur_url:
+                _log(f"  webmail not signed in (at {cur_url[:80]})")
+                await email_page.close()
+                try: await original_page.bring_to_front()
+                except Exception: pass
+                res["status"] = "webmail_not_signed_in"
+                res["error"]  = f"{provider} requires sign-in; please log in to webmail manually"
+                return res
+
+            WEBMAIL_DOMAINS = cfg["own_domains"]
+
+            # Open the first email in the search result so we scan its body,
+            # not the entire Gmail UI (which has huge amounts of noise).
+            async def _open_first_email():
+                if provider != "gmail":
+                    return False
+                try:
+                    first_row = email_page.locator("tr.zA").first
+                    if await first_row.count() > 0:
+                        await first_row.click()
+                        await asyncio.sleep(1.5)
+                        return True
+                except Exception:
+                    pass
+                return False
 
             code = None
             link = None
             import re as _re
             deadline = time.time() + timeout
+            opened_email = False
             while time.time() < deadline and not code and not link:
+                if not opened_email:
+                    opened_email = await _open_first_email()
                 try:
-                    content = await email_page.content()
+                    # Use visible inner_text to skip CSS/JS/hex color noise.
+                    # Keep raw HTML as fallback for href extraction.
+                    try:
+                        visible = await email_page.locator("body").inner_text(timeout=3000)
+                    except Exception:
+                        visible = ""
+                    raw_html = await email_page.content()
+                    # Scan links on raw HTML (so href attributes are seen),
+                    # scan codes on visible text only.
+                    content = raw_html
                     content_lower = content.lower()
                     # Look for password reset / verification links (common patterns)
                     link_patterns = [
-                        r'https?://[^\s"\'<>]+(?:reset|verify|confirm|activate|password)[^\s"\'<>]{10,}',
-                        r'https?://[^\s"\'<>]+token=[^\s"\'<>]{10,}',
-                        r'https?://[^\s"\'<>]+code=[^\s"\'<>]{6,}',
+                        r'https?://[^\s"\'<>]+[/?&=](?:reset|verify|confirm|activate|password)[a-z_-]*[/?&=][^\s"\'<>]{10,}',
+                        r'https?://[^\s"\'<>]+[?&]token=[^\s"\'<>]{10,}',
+                        r'https?://[^\s"\'<>]+[?&]code=[^\s"\'<>]{6,}',
                     ]
+                    # Static/CDN hosts that never contain real reset links.
+                    STATIC_HOSTS = ('gstatic.com', 'googleusercontent.com', 'googleapis.com',
+                                    'fonts.gstatic.com', 'www.w3.org', 'schema.org')
                     for pat in link_patterns:
                         hits = _re.findall(pat, content, _re.IGNORECASE)
-                        # Filter out tracking pixels, unsubscribe links, etc.
                         hits = [h for h in hits if not any(x in h.lower() for x in
-                                ['unsubscribe', 'pixel', 'tracking', 'open.php', 'click.php'])]
+                                ['unsubscribe', 'pixel', 'tracking', 'open.php', 'click.php',
+                                 '.png', '.jpg', '.gif', '.css', '.js', '.svg'])
+                                and not any(d in h.lower() for d in WEBMAIL_DOMAINS)
+                                and not any(d in h.lower() for d in STATIC_HOSTS)]
                         if hits:
                             link = hits[0]
                             _log(f"  found reset link: {link[:80]}...")
                             break
                     if not link:
-                        # Fall back to numeric OTP codes
-                        matches = _re.findall(r'\b(\d{4,8})\b', content)
+                        # Fall back to numeric OTP codes — scan visible text only
+                        matches = _re.findall(r'\b(\d{4,8})\b', visible)
                         if matches:
                             six_digit = [m for m in matches if len(m) == 6]
                             code = six_digit[0] if six_digit else matches[0]
@@ -511,7 +676,10 @@ async def exec_action(page, action: dict) -> dict:
                     pass
                 if not code and not link:
                     await asyncio.sleep(5)
-                    await email_page.reload(wait_until="domcontentloaded")
+                    # Go back to the search results and retry opening the first email
+                    await email_page.goto(url, wait_until="domcontentloaded")
+                    await asyncio.sleep(2)
+                    opened_email = False
 
             await email_page.close()
             # Bring original page back to front
@@ -608,11 +776,38 @@ async def main():
         # Round 1 always opens a fresh tab so the previous job's page stays visible.
         # Subsequent rounds reuse the current tab (last open page for this job).
         ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+        tab_hint_file = Path(BROWSER_STATE_DIR) / "tab_url.txt"
         if ROUND == 1:
             page = await ctx.new_page()
         else:
-            pages = ctx.pages
-            page  = pages[-1] if pages else await ctx.new_page()
+            # Find the tab we were working on. Require a recorded hint — if it's
+            # missing or no matching tab exists, fail loudly rather than silently
+            # picking a random page (which has caused job cross-contamination).
+            if not tab_hint_file.exists():
+                print(json.dumps({"round": ROUND, "job_id": JOB_ID,
+                    "results": [{"action": "tab_lookup", "status": "error",
+                                 "error": "no tab hint recorded — run round 1 first"}]}))
+                sys.exit(2)
+            hint = tab_hint_file.read_text().strip()
+            from urllib.parse import urlparse
+            h = urlparse(hint)
+            page = None
+            for pg in ctx.pages:
+                u = urlparse(pg.url)
+                if u.netloc == h.netloc:
+                    page = pg
+                    break
+            if page is None:
+                urls = [pg.url for pg in ctx.pages]
+                print(json.dumps({"round": ROUND, "job_id": JOB_ID,
+                    "results": [{"action": "tab_lookup", "status": "error",
+                                 "error": f"expected tab on host {h.netloc} (hint={hint[:80]}) "
+                                          f"not found among open tabs",
+                                 "open_tabs": urls}]}))
+                sys.exit(2)
+            _log(f"  resumed tab: {page.url[:80]}")
+            try: await page.bring_to_front()
+            except Exception: pass
 
         results = []
         for action in ACTIONS:
@@ -627,9 +822,19 @@ async def main():
                 results.append({"action": "close_tab", "status": "ok"})
                 continue
 
+            pages_before = len(ctx.pages)
             r = await exec_action(page, action)
             results.append(r)
             _log(f"  {r['status']:12} {r['action']}")
+            # If the action opened a new tab (popup), switch to it.
+            if len(ctx.pages) > pages_before:
+                page = ctx.pages[-1]
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                except Exception:
+                    pass
+                await page.bring_to_front()
+                _log(f"  switched to new tab: {page.url[:80]}")
             if r["status"] in ("timeout", "error") and action.get("abort_on_error"):
                 break
 
@@ -640,6 +845,13 @@ async def main():
             pass
 
         page_state = await capture_page_state(page)
+
+        # Persist the current tab's URL so subsequent rounds can re-find it
+        # even if the user (or other scripts) opened additional tabs after it.
+        try:
+            tab_hint_file.write_text(page.url)
+        except Exception:
+            pass
 
         # On confirmed submission: update tracker + close tab
         if page_state.get("confirmed"):
