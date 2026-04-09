@@ -112,3 +112,14 @@ Final step has a Submit button instead of Next:
 ```
 
 Verify submission by checking for confirmation phrases in `page.text` ("thank you", "application received", "we've received your application") or URL change to a `/thankYou` or `/Success` path.
+
+## click_filter anti-bot overlay (some tenants)
+
+Some Workday tenants (confirmed: `geico.wd1.myworkdayjobs.com`) place a `<div data-automation-id="click_filter" aria-label="Create Account" role="button">` overlay on top of the actual submit button (`data-automation-id="createAccountSubmitButton"` / `signInSubmitButton`). The actual button has `tabindex="-2"`.
+
+This div is a reCAPTCHA/anti-bot gate:
+- Clicking the overlay div directly may close the tab (bot detection triggered).
+- Hiding the overlay (`display:none` / `pointer-events:none`) and clicking the underlying button succeeds as a click but the server silently rejects (no reCAPTCHA token).
+- `form.submit()` via JS reloads the page without advancing.
+
+**No known automated workaround.** Use `wait_human_login` to ask the user to click the button manually. If user doesn't act, mark as `blocked: workday_click_filter_recaptcha`.

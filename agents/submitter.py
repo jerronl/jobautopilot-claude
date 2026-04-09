@@ -2,6 +2,7 @@
 from claude_agent_sdk import AgentDefinition
 from .base import load_skill_prompt, playwright_mcp, SKILLS_DIR
 
+KNOWLEDGE_DIR = SKILLS_DIR.parent / "knowledge"
 SCRIPTS_DIR = SKILLS_DIR / "submitter" / "scripts"
 CHECK_FIELDS_JS = SCRIPTS_DIR / "check_required_fields.js"
 
@@ -72,14 +73,60 @@ password flow.
    - `page.is_generic_page = true` → update tracker to `wrong_url`, add `{{"type":"close_tab"}}` as next action, skip to next job
    - `page.is_not_found = true` → update tracker to `expired`, add `{{"type":"close_tab"}}` as next action, skip to next job
    - `page.has_login = true` → apply Login wall strategy before proceeding
-5. **Detect the ATS and load the matching playbook — MANDATORY before round 2.**
-   Check `page.url` against these patterns and `Read` the corresponding file before writing round 2:
-   - `myworkdayjobs.com` → `Read` `{SKILLS_DIR}/submitter/ats_playbooks/workday.md`
-   - `oraclecloud.com/hcmUI/` or `/hcmUI/CandidateExperience` → `Read` `{SKILLS_DIR}/submitter/ats_playbooks/oracle_hcm.md`
-   - For ALL submissions, also `Read` `{SKILLS_DIR}/submitter/ats_playbooks/_selectors.md` once per job — it covers CSS selector rules and evaluate pitfalls that apply everywhere.
-   These playbooks contain verified click/upload/multiselect sequences. If the ATS matches and you skip this step, you are re-discovering solutions we already have — that wastes rounds and exceeds the circuit breaker.
-6. Read JSON stdout → plan next round → run it
-7. Repeat until applied/blocked/error → next job
+   - `page.has_email_verification = true` → Built-in / similar sites pop an email-OTP modal mid-application. Do NOT use `wait_human`. Next round: `{{"type":"fetch_email_code","email":"$USER_EMAIL","timeout_s":120,"search_query":"<gmail query>"}}`.
+
+     **`search_query` rules — be BROAD, not clever:**
+     - Always include `newer_than:30m` (not 10m — the email may not have arrived yet by the time you fetch).
+     - Use ONE filter term, not two AND'd together. `from:X subject:Y` means "both must match" and misses if either guess is slightly off.
+     - Prefer `subject:` over `from:` — sender domains are hard to guess (could be `noreply@oracle.com`, `no-reply@<employer>.com`, `accounts@builtin.com`, …), but subject lines reliably contain words like "code", "verification", "verify", "security".
+     - Safe defaults, in order of preference:
+       1. `"subject:(code OR verification OR verify OR security) newer_than:30m"` — broad subject match
+       2. `"newer_than:15m"` — just "most recent email" if you have no subject clue
+       3. `"from:<domain>  newer_than:30m"` — ONLY if you actually saw the sender domain on the page (e.g. the modal literally says "sent from noreply@builtin.com")
+     - Do NOT invent sender domains from the employer's website hostname — they rarely match.
+
+     Without `search_query` the scanner reads whatever email is at the top of the inbox and can return garbage (e.g. a year like "2026" from an unrelated email).
+
+     Round after: `fill` the returned `result.code` into `input[name='verification_code'], #verification_code, input[placeholder*='Security Code' i]` and click the adjacent Enter/Submit button. Then re-probe — the modal should be gone.
+5. **Consult the knowledge base — MANDATORY before round 2.**
+   The knowledge base lives at `{KNOWLEDGE_DIR}`. Two subfolders:
+   - `sites/<hostname>.md` — per-employer quirks (named by `new URL(page.url).hostname`)
+   - `skills/ats_playbooks/` and `skills/dropdowns/` — site-agnostic recipes and vocab
+
+   Do ALL of the following before writing round 2:
+   a. **Company file:** derive a parent-company slug from the hostname (e.g. `blackrock.wd1.myworkdayjobs.com` → `blackrock`; `careers.gs.com` → `goldman_sachs`) and `Read` `{KNOWLEDGE_DIR}/sites/<slug>.md`. If the file doesn't exist, skip (no error) — you may create it in the end-of-job review. Files are keyed by parent company, not hostname, so `wd1/wd2/wd3` subdomains share one file.
+   b. **ATS playbook:** check `page.url` and `Read` the matching file:
+      - `myworkdayjobs.com` → `{KNOWLEDGE_DIR}/skills/ats_playbooks/workday.md`
+      - `oraclecloud.com/hcmUI/` or `/hcmUI/CandidateExperience` → `{KNOWLEDGE_DIR}/skills/ats_playbooks/oracle_hcm.md`
+   c. **Selectors file:** always `Read` `{KNOWLEDGE_DIR}/skills/ats_playbooks/_selectors.md` once per job — cross-ATS CSS/evaluate rules.
+
+   These playbooks contain verified click/upload/multiselect sequences. Skipping them means re-discovering solutions we already have — wastes rounds and trips the circuit breaker.
+
+6. **Dropdown vocabulary — consult before clicking any degree / major / school / EEOC / country option.**
+   Under `{KNOWLEDGE_DIR}/skills/dropdowns/` there are files for:
+   `degrees.md`, `majors.md`, `schools.md`, `eeoc.md`, `countries.md`.
+
+   These files are **variant-mapping tables only** — canonical → list of label variants seen in the wild. The candidate's actual values come from profile/resume, NOT from these files.
+
+   Workflow when you encounter a matching dropdown:
+   1. Dump visible options via `evaluate` (standard Type B/C probe).
+   2. Get the canonical value from profile (e.g. "Master of Science").
+   3. `Read` the matching dropdown file → find that canonical heading → grab its variant list.
+   4. Match any variant against the dump, click it.
+
+7. Read JSON stdout → plan next round → run it
+8. Repeat until applied/blocked/error → next job
+
+## Knowledge-base review — ONCE per job, after it finishes
+
+After a job reaches a terminal state (applied / blocked / error) and you've written the progress log line, do a single review pass BEFORE moving to the next job. Do NOT edit knowledge files during the round loop — only here.
+
+Look back at the round JSONs you just produced and ask:
+- Did I learn a new dropdown label variant that wasn't in the matching `skills/dropdowns/*.md` file? → `Edit` append.
+- Did I discover a site quirk worth saving (parser mis-parses a specific field, a hidden required field, a confirmation message, a tricky selector that only this employer needs)? → `Edit` `{KNOWLEDGE_DIR}/sites/<hostname>.md` (create from the template in `sites/README.md` if missing).
+- Did I verify a new ATS recipe (click/upload/multiselect sequence) that future runs on the same ATS would reuse? → `Edit` the matching `skills/ats_playbooks/*.md`.
+
+Keep entries short and concrete. Skip if nothing novel came up — empty reviews are fine. Then move to the next job.
 
 ## Login wall strategy
 
@@ -211,10 +258,10 @@ Output: JSON on stdout
   "actions": [
     {{"type": "navigate",  "url": "https://..."}},
     {{"type": "wait",      "ms": 1500}},
-    {{"type": "fill",      "selector": "[name='firstName']",  "value": "Jerron"}},
-    {{"type": "fill",      "selector": "[name='lastName']",   "value": "Liu"}},
-    {{"type": "fill",      "selector": "[type='email']",      "value": "jerron@gmail.com"}},
-    {{"type": "fill",      "selector": "[type='tel']",        "value": "(347) 644-8088"}},
+    {{"type": "fill",      "selector": "[name='firstName']",  "value": "$USER_FIRST_NAME"}},
+    {{"type": "fill",      "selector": "[name='lastName']",   "value": "$USER_LAST_NAME"}},
+    {{"type": "fill",      "selector": "[type='email']",      "value": "$USER_EMAIL"}},
+    {{"type": "fill",      "selector": "[type='tel']",        "value": "$USER_PHONE"}},
     {{"type": "upload",    "selector": "input[type='file']",  "path": "/abs/path/resume.docx"}},
     {{"type": "click",     "selector": "button:has-text('Next')"}},
     {{"type": "wait_nav"}}
@@ -270,7 +317,7 @@ Symptom of missing this: Continue/Submit click reports an error like "X: This fi
 
 ## Verify pre-filled fields after every page load
 
-Many ATS portals (Avature, Workday, Greenhouse) auto-populate fields by parsing the uploaded resume. The parser often gets things wrong — e.g. it may put "(Zhiyong) Liu" in Last Name when the resume header is "Jerron (Zhiyong) Liu".
+Many ATS portals (Avature, Workday, Greenhouse) auto-populate fields by parsing the uploaded resume. The parser often gets things wrong — e.g. it may put a parenthesized middle name into Last Name (a resume header like `First (Middle) Last` often ends up as Last=`(Middle) Last`).
 
 After every page load (and after every Continue/Next that lands on a new step), do **one snapshot pass over all pre-filled visible fields** and check each value against the candidate profile:
 
@@ -295,7 +342,7 @@ Reason: optional cover letters meaningfully improve callback rates; never leave 
 
 ## Phone number formatting
 
-Phone fields often reject formatting characters. If a `fill` triggers a "digits only" / "invalid format" error, refill with digits-only (e.g. `(347) 644-8088` → `3476448088`).
+Phone fields often reject formatting characters. If a `fill` triggers a "digits only" / "invalid format" error, refill with digits-only (e.g. `(555) 123-4567` → `5551234567`).
 
 ## "Country" dropdowns — disambiguate before filling
 
@@ -399,8 +446,19 @@ Never blind-click option index 0.
 
 - **The tracker's blocked-note is a hint, not a map.** It tells you WHY a prior run got stuck, but the page state may be completely different now (the session may have been reset, the form may have re-navigated to step 1, etc.). NEVER write actions targeting selectors that appear in a blocked-note unless you have just seen them in the CURRENT round's `page.interactive`.
 - **Before every round after round 1, verify the selectors you plan to use are actually visible on the current page.** If `page.interactive` shows only a file upload + Next button, do NOT query `#source--source`, `#additional-questions-dropdown`, or any other field from memory — they are not on this page yet.
-- **Workday URLs (`*.myworkdayjobs.com`) — Read `{SKILLS_DIR}/submitter/ats_playbooks/workday.md` before round 2.** It contains the verified upload→Next sequence for step 1/7, the hierarchical multiselect drill-down for `#source--source`, the SPA progress-tracking rule (URL never changes across all 7 steps — judge by `page.interactive` changes), and the Submit button selector for step 7. Do NOT re-derive these from scratch — they're already verified.
-- **Oracle HCM URLs (`*.oraclecloud.com/hcmUI/`) — Read `{SKILLS_DIR}/submitter/ats_playbooks/oracle_hcm.md` before round 2.** Contains the verified `.cx-select-pill-section` click sequence (which requires Playwright native click, not `evaluate`) and section-based URL progression rules.
+- **Workday URLs (`*.myworkdayjobs.com`) — Read `{KNOWLEDGE_DIR}/skills/ats_playbooks/workday.md` before round 2.** It contains the verified upload→Next sequence for step 1/7, the hierarchical multiselect drill-down for `#source--source`, the SPA progress-tracking rule (URL never changes across all 7 steps — judge by `page.interactive` changes), and the Submit button selector for step 7. Do NOT re-derive these from scratch — they're already verified.
+- **Oracle HCM URLs (`*.oraclecloud.com/hcmUI/`) — Read `{KNOWLEDGE_DIR}/skills/ats_playbooks/oracle_hcm.md` before round 2.** Contains the verified `.cx-select-pill-section` click sequence (which requires Playwright native click, not `evaluate`) and section-based URL progression rules.
+
+## reCAPTCHA v3 is invisible — never declare it a blocker without re-probing
+
+reCAPTCHA v3 runs silently in the background and shows only a badge in the corner. It does NOT visually block Submit. After clicking a Submit button on any page that has a reCAPTCHA v3 badge:
+
+1. `wait` 1500–2500ms for navigation/AJAX
+2. Re-probe (`page.interactive` + body text)
+3. Check BOTH signals: (a) `page.confirmed=true` OR a post-submit phrase like "we will follow-up with an email", "application complete", "we'll be in touch"; AND (b) the original Submit button / form fields are no longer in `page.interactive`. Both must hold — many sites show "Thank you for your interest in applying" at the TOP of the blank form, so the phrase alone is not enough. If both hold → submission SUCCEEDED, mark `applied` and move on.
+4. Only if the form is still visible AND no confirmation text appears should you consider Submit blocked — and even then, try clicking Submit once more before escalating.
+
+Never emit `wait_human` with reason "reCAPTCHA v3 prevents submission" without having done step 2–3 first. The Jane Street failure mode was exactly this: the form was already submitted and showed "THANK YOU FOR YOUR APPLICATION", but the bot blamed the reCAPTCHA badge and handed off to the user.
 
 ## Round numbering rules
 

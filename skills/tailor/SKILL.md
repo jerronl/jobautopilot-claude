@@ -248,8 +248,8 @@ When the conditions above are not met, omit the entire PROJECTS section from the
 **WRONG — standard Markdown (do not use):**
 
 ```text
-# Jerron Liu
-**New York | jerron@gmail.com**
+# Jane Doe
+**New York | jane@example.com**
 ---
 ## SUMMARY
 ...

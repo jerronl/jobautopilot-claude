@@ -320,8 +320,19 @@ async def capture_page_state(page) -> dict:
     confirmed_phrases = [
         "application submitted", "application received", "successfully applied",
         "your application has been", "thank you for applying", "we received",
+        # Post-submit-only phrases (avoid generic "thank you for your application"
+        # which many sites put at the top of the blank application form)
+        "we will follow-up with an email", "we will follow up with an email",
+        "your application is complete", "application complete",
+        "we'll be in touch", "we will be in touch",
     ]
     captcha_phrases = ["captcha", "robot", "challenge", "cf-challenge", "verify you"]
+    email_verif_phrases = [
+        "security code we sent", "enter the code we sent", "we've made contact",
+        "verify that you're human", "verify that you are human",
+        "enter the security code", "enter the verification code",
+        "code we just sent", "check your email for a code",
+    ]
     login_phrases   = ["sign in", "log in", "login", "create an account", "sign up",
                         "forgot password", "reset password", "register"]
     # Job no longer available
@@ -358,6 +369,24 @@ async def capture_page_state(page) -> dict:
                          and any(p in title_lower for p in generic_title_patterns))
 
     is_generic_page = url_is_generic or title_is_generic
+
+    has_email_verification = any(p in body_lower for p in email_verif_phrases)
+    if not has_email_verification:
+        # Fallback: visible input whose name/placeholder/id looks like a verification-code field
+        try:
+            has_email_verification = await page.evaluate("""() => {
+                const sels = ['input[name*="verification" i]', 'input[name*="verify" i]',
+                              'input[id*="verification" i]', 'input[placeholder*="security code" i]',
+                              'input[placeholder*="verification code" i]'];
+                for (const s of sels) {
+                    for (const el of document.querySelectorAll(s)) {
+                        if (el.offsetParent !== null) return true;
+                    }
+                }
+                return false;
+            }""")
+        except Exception:
+            pass
     is_not_found = (any(p in body_lower for p in not_found_phrases)
                     or title_lower.startswith("error ")
                     or title_lower.endswith(" error")
@@ -370,6 +399,7 @@ async def capture_page_state(page) -> dict:
         "text":           body_text[:1000],
         "confirmed":      any(p in body_lower for p in confirmed_phrases),
         "has_captcha":    any(p in body_lower for p in captcha_phrases),
+        "has_email_verification": has_email_verification,
         # URL-only login detection. Body-text phrases ("sign in", "create account")
         # are false positives on Workday/Oracle apply forms, which always render those
         # strings in headers even when the candidate is already logged in and filling
@@ -667,7 +697,9 @@ async def exec_action(page, action: dict) -> dict:
                             break
                     if not link:
                         # Fall back to numeric OTP codes — scan visible text only
-                        matches = _re.findall(r'\b(\d{4,8})\b', visible)
+                        # Only 5-8 digits — 4-digit numbers are almost always years
+                        # (e.g. "2026") and cause false positives.
+                        matches = _re.findall(r'\b(\d{5,8})\b', visible)
                         if matches:
                             six_digit = [m for m in matches if len(m) == 6]
                             code = six_digit[0] if six_digit else matches[0]
