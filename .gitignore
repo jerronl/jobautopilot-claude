@@ -6,3 +6,4 @@ config.sh
 dist/
 build/
 *.egg-info/
+.playwright-mcp/
