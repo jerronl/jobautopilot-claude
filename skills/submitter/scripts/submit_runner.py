@@ -109,8 +109,8 @@ def _chromium_exe() -> str:
     raise RuntimeError("Chromium not found")
 
 
-async def _gc_tabs(browser, threshold=10, close_n=5):
-    """If context has more than `threshold` tabs, close the `close_n` oldest.
+async def _gc_tabs(browser, threshold=10, keep=5):
+    """If context has more than `threshold` tabs, close oldest until only `keep` remain.
     Protects about:blank placeholder and any tab matching a currently-held
     job hint URL (i.e. an active submit target)."""
     try:
@@ -120,6 +120,7 @@ async def _gc_tabs(browser, threshold=10, close_n=5):
         pages = list(ctx.pages)
         if len(pages) <= threshold:
             return
+        to_close = len(pages) - keep
         # Collect active hint URLs from all job state dirs
         hints = set()
         try:
@@ -132,7 +133,7 @@ async def _gc_tabs(browser, threshold=10, close_n=5):
         hint_hosts = {urlparse(h).netloc for h in hints if h}
         closed = 0
         for pg in pages:   # pages[0] is oldest
-            if closed >= close_n:
+            if closed >= to_close:
                 break
             try:
                 if urlparse(pg.url).netloc in hint_hosts:
@@ -810,6 +811,8 @@ async def main():
         ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
         tab_hint_file = Path(BROWSER_STATE_DIR) / "tab_url.txt"
         if ROUND == 1:
+            # GC before opening yet another tab
+            await _gc_tabs(browser)
             page = await ctx.new_page()
         else:
             # Find the tab we were working on. Require a recorded hint — if it's

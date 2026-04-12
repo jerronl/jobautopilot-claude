@@ -312,6 +312,51 @@ Rules:
 - One line per job — no multi-line blocks between jobs
 - Stage icons: 🎬 Orchestrator · 🔍 Search · ✂️ Tailor · 📨 Submitter — use these everywhere, never 📄 for tailor
 
+## Read-only browser tasks — reuse the submitter's authenticated browser
+
+The submitter's Playwright browser (`submit_runner.py`) is a persistent, already-signed-in session for whatever the user regularly uses: Gmail, Outlook, LinkedIn, employer portals, ATS dashboards, webmail, Calendar, etc. It accumulates cookies across runs, so by the time you need to read something, the user is almost certainly already logged in there.
+
+If the user asks you to **look something up** rather than apply to jobs — check inbox, read a LinkedIn message thread, look at an interview calendar invite, verify an application status page, scrape an offer letter, open a webmail provider, check a recruiter reply, etc. — delegate to **job-submitter** with a read-only prompt like:
+
+> "Read-only task — do NOT submit any application. Use submit_runner.py to browse the site. Report findings back to me."
+
+**Email scanning — read the BODY, not just the subject line.** Subject lines and snippets are not enough. Job-related emails often contain critical details inside the body: OA deadlines, interview scheduling links, background check forms, offer details, next-step instructions. When checking email:
+
+1. **Round 1 — list view:** Navigate to the inbox/search URL, wait for load, `evaluate` to extract a list of rows with sender, subject, snippet, and a clickable selector (e.g. Gmail `.zA` row index or element ID).
+2. **Round 2+ — open each relevant email:** For every email that looks job-related from the list view, click into it (one per round or batch if possible), `evaluate` to extract the full visible body text, then navigate back to the list. Look for:
+   - Action items: OA links, scheduling links, "complete by" deadlines, forms to fill
+   - Interview details: date/time, interviewer names, preparation instructions
+   - Offer/rejection signals: "we'd like to extend", "unfortunately", "next steps"
+   - Status updates: "your application has moved to", "background check initiated"
+3. **Report** with a clear split: ACTION NEEDED (with deadlines) vs. informational (confirmations, rejections, surveys).
+
+Do NOT skip opening emails — a subject line like "Your application update" could be a rejection, an interview invite, or an OA. You can't tell without reading the body.
+
+**After the submitter finishes scanning, update the tracker yourself.** Read `$TRACKER_PATH`, match each email finding to the corresponding tracker row by company + role, and update:
+
+| Email signal | Tracker update |
+|---|---|
+| Rejection email ("unfortunately", "not moving forward", "after careful consideration") | Status → `denied`. Append `DENIED <date>: rejection email received.` to notes. (`denied` = employer rejected; `screen_reject`/`user_reject` = we filtered it ourselves) |
+| OA / coding assessment invite | Keep status `applied`. Append `OA RECEIVED <date>: <platform> assessment, deadline <date if found>.` to notes. |
+| Interview invite / scheduling link | Status → `interviewing`. Append `INTERVIEW <date>: <details>.` to notes. |
+| Offer | Status → `offer`. Append `OFFER <date>: <details>.` to notes. |
+| "Application received" confirmation (for a row still in `blocked` or `resume_ready`) | Status → `applied`. Append `Confirmed applied via email <date>.` to notes. |
+| Draft / incomplete application reminder | Keep current status. Append `DRAFT REMINDER <date>: application saved but not submitted.` to notes. |
+
+Match conservatively — only update when you're confident the email corresponds to that tracker row. If a rejection email says "Senior Lead AI Engineer" and there are 3 Capital One AI roles, update only the one(s) whose title matches. When unsure, note the ambiguity and let the user decide.
+
+Build the URL and evaluate queries from the user's request. Examples:
+- Gmail search: `https://mail.google.com/mail/u/0/#search/<query>` + evaluate `.zA` rows, then click into each
+- Outlook: `https://outlook.live.com/mail/0/` + evaluate message list, then click into each
+- LinkedIn messages: `https://www.linkedin.com/messaging/` + click into conversation cards
+- Any employer ATS status dashboard the user already logged into
+
+The submitter agent knows how to drive Playwright and how to parse `page.interactive` / `evaluate` results. Its browser state directory persists across runs.
+
+**Do NOT ask the user to run `/mcp`** or authenticate any MCP server (Gmail, Outlook, Calendar, etc.) for read-only lookup tasks. **Do NOT use `mcp__*` tools for these tasks.** The Playwright route via submitter is the only one that works in this pipeline — it reuses existing logins and doesn't require fresh OAuth every time.
+
+MCP tools may still be appropriate for things that genuinely need a programmatic API (e.g. bulk structured calendar writes), but default to the browser route for anything read-only.
+
 ## User overrides — listen to the user
 
 If the user's prompt explicitly limits scope (e.g. "search only", "do not run submitter",
@@ -323,7 +368,7 @@ only when the user gives a generic prompt with no scope restriction.
 
 - **Never check the filesystem yourself to decide whether tailoring is needed.** If the tracker has `shortlist` entries, invoke the resume-tailor subagent — always. Do not inspect `$RESUME_OUTPUT_DIR` or determine that files "already exist". That is the tailor agent's job.
 - **Never mark jobs `resume_ready` yourself.** Only the tailor subagent may do this.
-- **Never mark jobs `blocked` or `applied` yourself.** Only the submitter subagent may do this.
+- **Never mark jobs `blocked` or `applied` yourself** — EXCEPT when updating based on email scan results (rejections, interview invites, OA notifications, confirmed-applied signals). In that case the orchestrator updates the tracker directly after the submitter reports email findings.
 
 ## Tracker
 {WORKSPACE / "job_application_tracker.md"}
