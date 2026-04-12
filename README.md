@@ -4,69 +4,20 @@
 [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-yellow.svg)](https://opensource.org/licenses/MIT-0)
 [![Powered by Claude SDK](https://img.shields.io/badge/Powered%20by-Claude%20Agent%20SDK-purple.svg)](https://github.com/anthropics/claude-agent-sdk)
 
-An intelligent AI agent that searches for jobs, critically rewrites your resume, and submits applications automatically — end-to-end.
+**AI agent that runs your job search end-to-end — search, tailor, apply, and triage email**
 
-**It doesn't just blindly apply to jobs — it understands you first, and gets smarter every time it runs.**
+It doesn't just blindly apply — it understands your career profile and gets smarter every time it runs.
 
 ![Pipeline running — search, tailor, and submit in parallel](assets/screenshot.png)
 
----
-
-## ✨ Why this is different from a simple script
-
-1. **It understands you first.**
-   Before doing anything, it reads your master resume to build a real candidate profile (skills, titles, seniority).
-   - **Search** uses this profile to filter roles and skip obvious mismatches.
-   - **Tailoring** uses your existing bullets, metrics, and tool names as raw material to rewrite for each specific role. _Zero hallucinations, nothing invented._
-
-2. **It remembers what it learns (The Compounding Advantage).**
-   Every run writes back into a self-updating knowledge base. The next time it hits the same company or form system, it already knows the traps.
-   - _4 companies in:_ It knows Capital One's Workday tenant has an anti-bot overlay.
-   - _10 companies in:_ It knows BuiltIn's autocomplete doesn't accept "Computational Finance" but accepts "Finance".
-   - _Ask it to check your inbox:_ It reads every email body (not just subject lines), flags OA deadlines and interview invites, and updates the tracker automatically — no OAuth, no MCP setup needed.
-   - **The pipeline gets faster and more reliable without any manual tuning.**
-
----
-
-## 🚦 Usage
-
-Job Autopilot uses a natural language CLI.
-
 ```bash
-source ~/.jobautopilot/config.sh
-
-# Run individual stages (browser window shown by default)
-jobautopilot "Search for quant developer jobs in New York"
-jobautopilot "Tailor resumes for shortlisted jobs"
-jobautopilot "Submit all resume_ready applications"
-
-# Check your inbox and update tracker automatically
-jobautopilot "Check my email for anything job-related I need to handle"
-
-# Or let the orchestrator run everything
+### ⚡ Run it with a natural-language command
 jobautopilot "Run the full pipeline"
-
-# Hide the browser window
-jobautopilot --headless "Run the full pipeline"
 ```
 
 ---
 
-## 🧠 Architecture
-
-Three specialized subagents coordinated by an orchestrator run concurrently like a conveyor belt:
-
-| Agent                | Responsibility                                                                                                                                                  |
-| :------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 🔍 **job-search**    | Reads your profile to drive keyword selection. Searches LinkedIn, Indeed, Glassdoor, ZipRecruiter, and company pages. Updates the tracker.                      |
-| ✍️ **resume-tailor** | Fetches shortlisted job descriptions, rewrites your real resume bullets to match, and generates a tailored `.docx` + cover letter.                              |
-| 🤖 **job-submitter** | Fills fields, uploads documents, and submits. Handles login walls autonomously (saved credentials, Forgot Password flows via webmail, or new account creation). |
-
-Real-time progress appears inline in the terminal, including which company and round the submitter is on.
-
----
-
-## 🛠 Setup
+## ⚡ Quick Start
 
 ```bash
 git clone https://github.com/jerronl/jobautopilot-claude
@@ -74,16 +25,45 @@ cd jobautopilot-claude
 ./setup.sh
 ```
 
-`setup.sh` will ask for your personal info, then install dependencies and Playwright browsers.
+`setup.sh` will configure your environment and install Playwright browsers. Then run:
+
+```bash
+source ~/.jobautopilot/config.sh
+### ⚡ Run it with a natural-language command
+jobautopilot "Run the full pipeline"
+```
 
 **Requirements:**
+
 - **Python 3.11+**
 - **Node.js** (for Playwright browser automation)
-- **Auth:** [Claude CLI](https://claude.ai/code) (already logged in) OR an [Anthropic API key](https://console.anthropic.com/)
+- **Auth:** [Claude CLI](https://claude.ai/code) (logged in) OR an [Anthropic API key](https://console.anthropic.com/)
+
+## 🚦 Usage
+
+```bash
+source ~/.jobautopilot/config.sh
+
+# Run everything end-to-end (The Main Path)
+jobautopilot "Run the full pipeline"
+
+# Check your inbox, flag OA/interviews, and update tracker automatically
+jobautopilot "Check my email for anything job-related I need to handle"
+
+# Run individual stages manually
+jobautopilot "Search for quant developer jobs in New York"
+jobautopilot "Tailor resumes for shortlisted jobs"
+jobautopilot "Submit all resume_ready applications"
+
+# Background mode
+jobautopilot --headless "Run the full pipeline"
+```
+
+---
 
 ## 📂 Resume Pool
 
-After setup, put your resume in the directory you configured (default: `~/Documents/jobs/`):
+After setup, put your resume in the configured directory (default: `~/Documents/jobs/`):
 
 ```
 ~/Documents/jobs/
@@ -92,56 +72,91 @@ After setup, put your resume in the directory you configured (default: `~/Docume
 └── Resume_for_dreaming.docx  # any tailored versions
 ```
 
-That's all you need. Both agents read this file first — search to build your profile, tailor to extract raw material for rewriting.
+The agent reads this first to build your profile for search and extracts bullet points for high-fidelity tailoring.
+
+---
+
+## ✨ Why This Is Not Just Another Apply Bot
+
+1. **It understands you first.**
+   It builds a candidate profile (skills, seniority, industries) to drive the **Search** stage, skipping mismatches. **Tailoring** uses your actual metrics and tool names to rewrite for specific roles. _Zero hallucinations, nothing invented._
+
+2. **It remembers what it learns (The Compounding Advantage).**
+   Every run writes back into a self-updating knowledge base.
+   - _4 companies in:_ It knows Capital One's Workday tenant has an anti-bot overlay.
+   - _10 companies in:_ It knows BuiltIn's autocomplete doesn't accept "Computational Finance" but accepts "Finance".
+   - **The pipeline gets faster and more reliable without manual tuning.**
+
+## ⭐ What This Replaces
+
+This is not a browser autofill tool. It replaces:
+
+- Manually searching for jobs across multiple boards
+- Deciding what to apply to based on gut feel
+- Rewriting resumes for each role by hand
+- Filling the same form fields over and over
+- Checking your inbox for rejections and interview invites
+
+It runs your job search for you — end to end.
+
+---
+
+## 🧠 Architecture
+
+Three specialized subagents coordinated by an orchestrator run concurrently like a conveyor belt:
+
+| Agent                | Responsibility                                                                          |
+| :------------------- | :-------------------------------------------------------------------------------------- |
+| 🔍 **job-search**    | Drives keyword selection. Searches LinkedIn, Indeed, Glassdoor, and company pages.      |
+| ✍️ **resume-tailor** | Critically rewrites resume bullets to match job descriptions. Generates `.docx`.        |
+| 🤖 **job-submitter** | Fills forms and handles login walls (saved creds, password flows, or account creation). |
+
+---
+
+## 📩 Email Triage (No OAuth Needed)
+
+The orchestrator scans your inbox through the submitter's **already-signed-in browser**. It reads the full email body, logs rejections (`denied`), flags interview scheduling links (`interviewing`), and notes OA deadlines in your tracker automatically.
 
 ---
 
 ## 📚 Self-Updating Knowledge Base
 
-Agents don't re-discover the same ATS quirks on every run. The `knowledge/` tree persists what the pipeline learns:
+Agents persist what they learn into the `knowledge/` tree to avoid re-discovering ATS quirks:
 
 ```
 knowledge/
-├── sites/                   # per-company quirks (keyed by parent company, not hostname)
-│   ├── stripe.md            # "Location is a react-select autocomplete — type then click [role='option']"
-│   ├── capital_one.md       # Workday click_filter anti-bot overlay, wait_human_login required
-│   └── ...
+├── sites/                   # Per-company quirks (e.g., Stripe, Capital One)
 └── skills/
-    ├── ats_playbooks/       # verified click/upload/multiselect recipes per ATS
-    │   ├── workday.md       # hierarchical source multiselect, 7-step SPA
-    │   ├── oracle_hcm.md    # .cx-select-pill-section native-click requirement
-    │   ├── ashby.md         # agent-authored, no human involvement
-    │   └── _selectors.md    # cross-ATS CSS/evaluate pitfalls
-    └── dropdowns/           # canonical → variant-list mappings
-        ├── degrees.md       # "MS" / "M.S." / "Master of Science" / "MSc" / ...
-        ├── countries.md     # "United States" / "USA" / "United States (+1)" / ...
-        └── eeoc.md, majors.md, schools.md
+    ├── ats_playbooks/       # Verified recipes for Workday, Ashby, Oracle HCM
+    └── dropdowns/           # Canonical -> variant mappings (Degrees, Countries, Majors)
 ```
 
-Agents read these files before round 2 of any submission, and append new variants, quirks, and recipes during a once-per-job review pass. Each run's knowledge compounds into the next.
+---
+
+## 🧱 Hardened by Real Failures
+
+Tested against real-world edge cases that break simple scrapers:
+
+- **OTP Regex:** Only accepts 5-8 digits to avoid confusing years (2026) with codes.
+- **reCAPTCHA v3:** Re-probes after every Submit click to confirm forms actually submitted.
+- **URL-only Login Detection:** Trusts URL-path signals over deceptive "Sign In" text on Workday pages.
+- **Email OTP Modals:** Automatically fetches codes via Gmail search and inputs them.
 
 ---
 
 ## 📊 Tracker
 
-The job tracker lives at `~/.jobautopilot/workspace/job_application_tracker.md`.
+Track progress at `~/.jobautopilot/workspace/job_application_tracker.md`.
 
-| Status          | Meaning                                                         |
-| --------------- | --------------------------------------------------------------- |
-| `found`         | Discovered by search, not yet screened                          |
-| `screen_reject` | Filtered out (salary, location, seniority, duplicate)           |
-| `user_reject`   | Skipped after user review                                       |
-| `shortlist`     | Approved, waiting for resume tailoring                          |
-| `tailoring`     | Resume/cover letter in progress                                 |
-| `resume_ready`  | `.docx` files ready, waiting to submit                          |
-| 🟢 `applied`    | Application submitted successfully                              |
-| 🔴 `denied`     | Employer rejected (rejection email received)                    |
-| 🗓 `interviewing` | Interview stage (scheduling link or invite received)          |
-| 🎉 `offer`      | Offer extended                                                  |
-| ⚠️ `blocked`    | Submitter could not complete (login wall, CAPTCHA, broken form) |
-| `expired`       | Job listing no longer active                                    |
-| `hold`          | Paused, revisit later                                           |
-| `error`         | Something went wrong                                            |
+| Status            | Meaning                |
+| :---------------- | :--------------------- |
+| `found`           | Discovered by search   |
+| `shortlist`       | Approved for tailoring |
+| 🟢 `applied`      | Submitted successfully |
+| 🗓 `interviewing` | Invite received        |
+| 🔴 `denied`       | Rejection received     |
+| 🎉 `offer`        | Offer extended         |
+| ⚠️ `blocked`      | CAPTCHA or broken form |
 
 ---
 
