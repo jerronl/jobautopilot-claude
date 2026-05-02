@@ -524,7 +524,7 @@ echo "eFinancialCareers, etc.) that require an account."
 echo ""
 
 _SEARCH_PROFILE="$HOME/.jobautopilot/browser_profiles/search"
-_SUBMIT_PROFILE="$RESUME_OUTPUT_DIR/state/_browser/user_data"
+_SUBMIT_PROFILE="$HOME/.jobautopilot/browser_profiles/submit"
 mkdir -p "$_SEARCH_PROFILE" "$_SUBMIT_PROFILE"
 
 _JOB_SITES=(

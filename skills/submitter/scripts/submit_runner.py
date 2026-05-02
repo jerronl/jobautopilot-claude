@@ -19,15 +19,21 @@ Exit codes:
     1 — blocked (CAPTCHA, login timeout)
     2 — fatal error
 """
-import asyncio, json, os, shutil, socket, subprocess, sys, time
+import asyncio, json, os, random, shutil, socket, subprocess, sys, time
 os.environ.setdefault("NODE_NO_WARNINGS", "1")
 from pathlib import Path
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-# Shared state dir — lives alongside tailored resumes
+# Browser profile — stored alongside other agent profiles; configurable via env var
+_BROWSER_PROFILE_ROOT = Path.home() / ".jobautopilot" / "browser_profiles"
+_USER_DATA_DIR = Path(os.environ.get(
+    "SUBMIT_BROWSER_PROFILE_DIR",
+    str(_BROWSER_PROFILE_ROOT / "submit"),
+))
+_CDP_PORT_FILE = _BROWSER_PROFILE_ROOT / ".submit.cdp_port"
+
+# Job state dir — lives alongside tailored resumes (for tab_url.txt GC hints)
 _SHARED_STATE = Path(os.environ.get("RESUME_OUTPUT_DIR", "/tmp")) / "state" / "_browser"
-_CDP_PORT_FILE = _SHARED_STATE / "cdp_port.txt"
-_USER_DATA_DIR = _SHARED_STATE / "user_data"   # persistent cookies / login state
 
 # Progress log — tailed by orchestrator for real-time display
 _PROGRESS_LOG = Path(os.environ.get("RESUME_OUTPUT_DIR", "/tmp")) / "state" / "submit_progress.log"
@@ -109,6 +115,34 @@ def _chromium_exe() -> str:
     raise RuntimeError("Chromium not found")
 
 
+async def _tag_page(page, job_id: str) -> None:
+    """Stamp a window-scoped marker so future rounds can re-find this exact
+    tab even when the user has other tabs open on the same host (e.g. a
+    foreground Chainguard tab while we're submitting a Headway role —
+    both live on boards.greenhouse.io).
+
+    The tag is set on `window` so it survives same-origin navigations within
+    the apply flow. Cross-origin navigation will lose it; we re-tag at the
+    end of every round to keep the tag fresh."""
+    try:
+        await page.evaluate(f"() => {{ window.__jobautopilot_jobid = {json.dumps(job_id)}; }}")
+    except Exception:
+        pass
+
+
+async def _find_tagged_page(ctx, job_id: str):
+    """Locate the page that was tagged with this job_id. Returns None if
+    no tab carries the marker."""
+    for pg in ctx.pages:
+        try:
+            tag = await pg.evaluate("() => window.__jobautopilot_jobid || null")
+        except Exception:
+            continue
+        if tag == job_id:
+            return pg
+    return None
+
+
 async def _gc_tabs(browser, threshold=10, keep=5):
     """If context has more than `threshold` tabs, close oldest until only `keep` remain.
     Protects about:blank placeholder and any tab matching a currently-held
@@ -150,7 +184,6 @@ async def _gc_tabs(browser, threshold=10, keep=5):
 
 async def _get_browser(p):
     """Connect to existing detached browser, or launch a new one."""
-    _SHARED_STATE.mkdir(parents=True, exist_ok=True)
     _USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     if _CDP_PORT_FILE.exists():
@@ -327,7 +360,8 @@ async def capture_page_state(page) -> dict:
         "your application is complete", "application complete",
         "we'll be in touch", "we will be in touch",
     ]
-    captcha_phrases = ["captcha", "robot", "challenge", "cf-challenge", "verify you"]
+    captcha_phrases = ["i'm not a robot", "i am not a robot", "prove you're human",
+                       "prove you are human"]  # last-resort text fallback; DOM check below is primary
     email_verif_phrases = [
         "security code we sent", "enter the code we sent", "we've made contact",
         "verify that you're human", "verify that you are human",
@@ -371,6 +405,35 @@ async def capture_page_state(page) -> dict:
 
     is_generic_page = url_is_generic or title_is_generic
 
+    # DOM-based captcha detection — far more reliable than text matching.
+    try:
+        has_captcha = await page.evaluate("""() => {
+            const s = sel => !!document.querySelector(sel);
+            return (
+                // Cloudflare challenge / interstitial
+                s('#challenge-running, #challenge-form, .cf-browser-verification, #cf-challenge-running') ||
+                // Cloudflare Turnstile (visible widget)
+                s('iframe[src*="challenges.cloudflare.com"], .cf-turnstile') ||
+                // Google reCAPTCHA v2 visible challenge: bframe = challenge popup, or visible .g-recaptcha checkbox
+                // Do NOT check anchor iframe — v3 invisible also uses anchor but runs silently in background
+                (s('iframe[src*="recaptcha"][src*="bframe"]') ||
+                 (() => { const el = document.querySelector('.g-recaptcha'); return el && el.offsetWidth > 50 && el.offsetHeight > 50; })()) ||
+                // hCaptcha — only when the challenge frame is actually visible (not invisible background frame)
+                Array.from(document.querySelectorAll('iframe[src*="hcaptcha"]'))
+                    .some(f => f.src.includes('frame=challenge') && f.offsetWidth > 50 && f.offsetHeight > 50) ||
+                // Arkose Labs / FunCaptcha
+                s('iframe[src*="arkoselabs"], iframe[src*="funcaptcha"], #arkoseFrame') ||
+                // FriendlyCaptcha
+                s('.frc-captcha[data-puzzle-endpoint]')
+            );
+        }""")
+    except Exception:
+        has_captcha = False
+    # Secondary: title-based Cloudflare check + minimal text fallback
+    if not has_captcha:
+        has_captcha = ("just a moment" in title_lower or
+                       any(p in body_lower for p in captcha_phrases))
+
     has_email_verification = any(p in body_lower for p in email_verif_phrases)
     if not has_email_verification:
         # Fallback: visible input whose name/placeholder/id looks like a verification-code field
@@ -399,7 +462,7 @@ async def capture_page_state(page) -> dict:
         "interactive":    interactive,
         "text":           body_text[:1000],
         "confirmed":      any(p in body_lower for p in confirmed_phrases),
-        "has_captcha":    any(p in body_lower for p in captcha_phrases),
+        "has_captcha":    has_captcha,
         "has_email_verification": has_email_verification,
         # URL-only login detection. Body-text phrases ("sign in", "create account")
         # are false positives on Workday/Oracle apply forms, which always render those
@@ -506,6 +569,36 @@ async def exec_action(page, action: dict) -> dict:
             else:
                 res["status"] = "not_found"
 
+        elif t == "click_humanized":
+            # Human-like click: scroll into view, mouse warmup, jitter click.
+            # Verified to bypass Workday's click_filter anti-bot overlay (GEICO, 2026-04-20).
+            sel = action["selector"]
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                await el.scroll_into_view_if_needed()
+                await asyncio.sleep(0.4)
+                box = await el.bounding_box()
+                if box:
+                    # Warm up mouse with 2-3 moves around the page before approaching button
+                    for _ in range(random.randint(2, 3)):
+                        await page.mouse.move(
+                            random.randint(150, 700), random.randint(150, 500)
+                        )
+                        await asyncio.sleep(random.uniform(0.12, 0.25))
+                    # Approach button in two steps with slight overshoot
+                    cx = box["x"] + box["width"] * random.uniform(0.3, 0.7)
+                    cy = box["y"] + box["height"] * random.uniform(0.3, 0.7)
+                    await page.mouse.move(cx - random.uniform(10, 25), cy - random.uniform(5, 15))
+                    await asyncio.sleep(random.uniform(0.10, 0.20))
+                    await page.mouse.move(cx, cy)
+                    await asyncio.sleep(random.uniform(0.12, 0.22))
+                    await page.mouse.click(cx, cy)
+                else:
+                    await el.click()
+                res["status"] = "ok"
+            else:
+                res["status"] = "not_found"
+
         elif t == "upload":
             # Two modes:
             #   1. Direct: set files on the <input type=file> via `selector`.
@@ -557,9 +650,18 @@ async def exec_action(page, action: dict) -> dict:
             res["status"] = "ok"
 
         elif t == "evaluate":
-            result = await page.evaluate(action["expression"])
-            res["status"] = "ok"
-            res["result"] = result
+            try:
+                result = await page.evaluate(action["expression"])
+                res["status"] = "ok"
+                res["result"] = result
+            except Exception as e:
+                msg = str(e)
+                if "has-text" in action.get("expression", "") and "SyntaxError" in msg:
+                    msg = ("SyntaxError: :has-text() is Playwright-only and cannot be used inside "
+                           "evaluate()/querySelector(). Use textContent filtering instead: "
+                           "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('Submit'))")
+                res["status"] = "error"
+                res["error"] = msg[:300]
 
         elif t == "check_login":
             # Detection-only. Never blocks. Returns status=needs_login if not
@@ -771,18 +873,45 @@ async def exec_action(page, action: dict) -> dict:
                 _log_progress(f"⚠ {JOB_ID} — no manual login in {timeout}s, proceeding with Forgot Password")
 
         elif t == "wait_human":
+            # Pause and wait for the user to fix something in the browser.
+            # Resume on either: (a) the user touches `.continue` in the job's
+            # state dir → status=ok, agent retries; or (b) `.skip` → status=skip,
+            # agent marks the job blocked and moves on; or (c) timeout.
             reason  = action.get("reason", "human needed")
-            timeout = action.get("timeout_s", 120)
+            timeout = action.get("timeout_s", 1800)  # 30 min — real human time
+            state_dir = Path(BROWSER_STATE_DIR)
+            cont_file = state_dir / ".continue"
+            skip_file = state_dir / ".skip"
+            # Clear any stale signals from a previous wait
+            cont_file.unlink(missing_ok=True)
+            skip_file.unlink(missing_ok=True)
+            cont_cmd = f"touch {cont_file}"
+            skip_cmd = f"touch {skip_file}"
             _alert(f"{reason} — {page.url}")
-            _log_progress(f"⚠️  {JOB_ID} — waiting for human: {reason}")
+            _log_progress(
+                f"✋ {JOB_ID} — paused: {reason}\n"
+                f"   Fix in the browser, then run ONE of:\n"
+                f"     {cont_cmd}      (resume — agent will re-probe)\n"
+                f"     {skip_cmd}          (give up on this job, move to next)"
+            )
             deadline = time.time() + timeout
+            outcome = "timeout"
             while time.time() < deadline:
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)
+                if cont_file.exists():
+                    cont_file.unlink(missing_ok=True)
+                    outcome = "ok"
+                    _log_progress(f"✓ {JOB_ID} — resume signal received, continuing")
+                    break
+                if skip_file.exists():
+                    skip_file.unlink(missing_ok=True)
+                    outcome = "skip"
+                    _log_progress(f"⏭  {JOB_ID} — skip signal received, marking blocked")
+                    break
                 remaining = int(deadline - time.time())
-                if remaining % 20 == 0:
-                    _log(f"  waiting for human... {remaining}s left")
-                    _log_progress(f"⏳ {JOB_ID} — {reason} ({remaining}s left)")
-            res["status"] = "timeout"
+                if remaining > 0 and remaining % 60 == 0:
+                    _log_progress(f"⏳ {JOB_ID} — still paused ({remaining}s left). {cont_cmd}")
+            res["status"] = outcome
 
         else:
             res["status"] = "unknown_action"
@@ -815,34 +944,65 @@ async def main():
             await _gc_tabs(browser)
             page = await ctx.new_page()
         else:
-            # Find the tab we were working on. Require a recorded hint — if it's
-            # missing or no matching tab exists, fail loudly rather than silently
-            # picking a random page (which has caused job cross-contamination).
-            if not tab_hint_file.exists():
-                print(json.dumps({"round": ROUND, "job_id": JOB_ID,
-                    "results": [{"action": "tab_lookup", "status": "error",
-                                 "error": "no tab hint recorded — run round 1 first"}]}))
-                sys.exit(2)
-            hint = tab_hint_file.read_text().strip()
-            from urllib.parse import urlparse
-            h = urlparse(hint)
-            page = None
-            for pg in ctx.pages:
-                u = urlparse(pg.url)
-                if u.netloc == h.netloc:
-                    page = pg
-                    break
+            # Find the tab we were working on. Prefer the window-tagged page
+            # (set by round 1+ via _tag_page) — netloc-only matching is unsafe
+            # because the user may have other tabs open on the same host
+            # (e.g. multiple Greenhouse postings; the runner used to grab the
+            # user's foreground tab and contaminate it).
+            page = await _find_tagged_page(ctx, JOB_ID)
             if page is None:
-                urls = [pg.url for pg in ctx.pages]
-                print(json.dumps({"round": ROUND, "job_id": JOB_ID,
-                    "results": [{"action": "tab_lookup", "status": "error",
-                                 "error": f"expected tab on host {h.netloc} (hint={hint[:80]}) "
-                                          f"not found among open tabs",
-                                 "open_tabs": urls}]}))
-                sys.exit(2)
+                # Fall back: stricter URL match against the recorded hint.
+                # Compare host AND first 2 path segments — that's specific
+                # enough to distinguish /chainguard/jobs/X from /headway/jobs/Y
+                # on shared hosts like boards.greenhouse.io.
+                if not tab_hint_file.exists():
+                    print(json.dumps({"round": ROUND, "job_id": JOB_ID,
+                        "results": [{"action": "tab_lookup", "status": "error",
+                                     "error": "no tab hint recorded — run round 1 first"}]}))
+                    sys.exit(2)
+                hint = tab_hint_file.read_text().strip()
+                from urllib.parse import urlparse
+                h = urlparse(hint)
+                hint_path_prefix = "/".join(h.path.split("/")[:3])  # /<a>/<b>
+                candidates = []
+                for pg in ctx.pages:
+                    u = urlparse(pg.url)
+                    if u.netloc != h.netloc:
+                        continue
+                    if hint_path_prefix and not u.path.startswith(hint_path_prefix):
+                        continue
+                    candidates.append(pg)
+                if len(candidates) == 1:
+                    page = candidates[0]
+                elif len(candidates) > 1:
+                    # Prefer exact URL match; otherwise refuse rather than
+                    # guess and contaminate a sibling tab.
+                    exact = [pg for pg in candidates if pg.url == hint]
+                    if len(exact) == 1:
+                        page = exact[0]
+                    else:
+                        print(json.dumps({"round": ROUND, "job_id": JOB_ID,
+                            "results": [{"action": "tab_lookup", "status": "error",
+                                         "error": f"ambiguous tab match for host {h.netloc} "
+                                                  f"path {hint_path_prefix} — refusing to guess",
+                                         "open_tabs": [pg.url for pg in candidates]}]}))
+                        sys.exit(2)
+                if page is None:
+                    urls = [pg.url for pg in ctx.pages]
+                    print(json.dumps({"round": ROUND, "job_id": JOB_ID,
+                        "results": [{"action": "tab_lookup", "status": "error",
+                                     "error": f"expected tab on host {h.netloc} path {hint_path_prefix} "
+                                              f"(hint={hint[:80]}) not found among open tabs",
+                                     "open_tabs": urls}]}))
+                    sys.exit(2)
             _log(f"  resumed tab: {page.url[:80]}")
             try: await page.bring_to_front()
             except Exception: pass
+
+        # Tag the page so future rounds can find it even if the user opens
+        # other tabs on the same host. Tag is set on window — survives
+        # same-origin navigation within the apply flow.
+        await _tag_page(page, JOB_ID)
 
         results = []
         for action in ACTIONS:
@@ -883,10 +1043,15 @@ async def main():
 
         # Persist the current tab's URL so subsequent rounds can re-find it
         # even if the user (or other scripts) opened additional tabs after it.
+        current_url = page.url
         try:
-            tab_hint_file.write_text(page.url)
+            tab_hint_file.write_text(current_url)
         except Exception:
             pass
+
+        # Re-tag in case mid-round navigation (e.g. cross-origin redirect to
+        # an embedded application host) wiped the window marker.
+        await _tag_page(page, JOB_ID)
 
         # On confirmed submission: update tracker + close tab
         if page_state.get("confirmed"):
@@ -902,9 +1067,9 @@ async def main():
         if page_state.get("confirmed"):
             _log_progress(f"✓ {JOB_ID} — submitted!")
         elif page_state.get("has_login"):
-            _log_progress(f"⚠ {JOB_ID} — round {ROUND} ended on login page")
+            _log_progress(f"⚠ {JOB_ID} — round {ROUND} ended on login page: {current_url}")
         elif page_state.get("has_captcha"):
-            _log_progress(f"⚠ {JOB_ID} — round {ROUND} ended on captcha")
+            _log_progress(f"⚠ {JOB_ID} — round {ROUND} ended on captcha: {current_url}")
         elif any(r.get("status") == "error" for r in results):
             errors = [r.get("error","?") for r in results if r.get("status") == "error"]
             _log_progress(f"✗ {JOB_ID} — round {ROUND} error: {errors[0][:80]}")

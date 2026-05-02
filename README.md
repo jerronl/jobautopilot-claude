@@ -8,7 +8,7 @@
 
 It doesn't just blindly apply — it understands your career profile and gets smarter every time it runs.
 
-![Pipeline running — search, tailor, and submit in parallel](assets/screenshot.png)
+![Pipeline running — search, tailor, and submit in parallel](assets/jobautopilot.gif)
 
 ```bash
 ### ⚡ Run it with a natural-language command

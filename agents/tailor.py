@@ -72,13 +72,14 @@ Use Read/Write/Edit tools. Save files to $RESUME_OUTPUT_DIR.
 """
 
 
-def definition(headed: bool = False) -> AgentDefinition:
+def definition(headed: bool = False, model: str | None = None) -> AgentDefinition:
     return AgentDefinition(
         description=(
             "Tailors resumes and cover letters for shortlisted jobs. "
             "Fetches each job description, rewrites resume bullets to match, "
             "and produces .docx files. Run after the search agent."
         ),
+        model=model or "opus",
         prompt=HEADER + load_skill_prompt("tailor"),
         tools=[
             "Bash", "Read", "Write", "Edit", "Glob", "WebSearch", "WebFetch",

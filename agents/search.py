@@ -95,13 +95,14 @@ Use Read/Write/Edit/Bash tools for the tracker, handoff files, and progress log.
 """
 
 
-def definition(headed: bool = False) -> AgentDefinition:
+def definition(headed: bool = False, model: str | None = None) -> AgentDefinition:
     return AgentDefinition(
         description=(
             "Searches LinkedIn and other job boards for roles matching the candidate profile. "
             "Reads the resume pool to build keywords, applies hard filters, and writes results "
             "to the job tracker. Use this agent first in the pipeline."
         ),
+        model=model or "haiku",
         prompt=HEADER + load_skill_prompt("search"),
         tools=[
             "Read", "Write", "Edit", "Glob", "Bash", "WebSearch", "WebFetch",

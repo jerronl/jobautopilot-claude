@@ -82,3 +82,30 @@ Some Ashby forms have acknowledgment checkboxes (e.g. "I acknowledge that I have
 - The runner's `page.confirmed` may return `false` even on success
 - Check `page.text` for "Success" or use evaluate to read body text for confirmation
 - Confirmation phrase: "Thank you for your interest in"
+
+## Phone field accepts digits-only
+
+If the phone placeholder is `1-415-555-1234` style, Ashby validates as a phone number and rejects formatted input like `(347) 644-8088` with a `Missing entry for required field: Phone` error. Use digits-only `3476448088`. (Verified at Notion 2026-04-29.)
+
+## Notion-specific quirks
+
+- Pronouns are required as a radio group: click `label:has-text('He/Him')`, etc.
+- Location field is a custom autocomplete — use `type` to enter a partial query, then `click ._result_v5ami_103:has-text('New York City, New York, United States')` to commit.
+- Single Yes/No buttons need the fieldEntry-scoped selector pattern: `._fieldEntry_17tft_29:has-text('full label text') button:has-text('Yes')`.
+- Yes/No buttons commit independently; verify with `evaluate` reading `class.includes('_active_y2cw4_58')` on the button.
+
+## Confirmation phrase variants
+
+- Notion / Rillet / OpenAI (2026-04-29): "Your application was successfully submitted. We'll contact you if there are next steps."
+- Sierra (older): "Awesome! Your application was successfully submitted. We'll review your profile and contact you if we find a fit."
+
+## Date picker fields (e.g. "When can you start?")
+
+If a field has placeholder "Pick date..." and class `_input_vhnr2_29`, it's an Ashby date input. To fill:
+1. Click the input
+2. `type` value `MM/DD/YYYY` (e.g. `06/01/2026`)
+3. Press `Enter` to commit
+
+Confirmed at OpenAI Codex 2026-04-29.
+
+Note: the `success: true` keyword check on body text can match other words ("successfully" appears in product copy too). Always look for the EXACT phrase "application was successfully submitted" or "Your application was" to confirm.

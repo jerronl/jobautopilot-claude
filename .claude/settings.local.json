@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/jerron/.jobautopilot/browser_profiles/**)",
+      "Bash(python3 *)",
+      "Bash(nohup /home/jerron/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome --remote-debugging-port=36123 --user-data-dir=/home/jerron/.jobautopilot/browser_profiles/search --no-first-run --no-default-browser-check --no-sandbox --window-size=960,540 --window-position=960,540 about:blank)",
+      "Bash(echo \"PID $!\")",
+      "Bash(awk '{for\\(i=1;i<=NF;i++\\) if\\($i~/user-data-dir|remote-debugging-port/\\) printf $i\" \"; print \"\"}')",
+      "Bash(echo \"exit: $?\"2)",
+      "WebFetch(domain:geico.wd1.myworkdayjobs.com)",
+      "Bash(pip3 show *)",
+      "Bash(python -c \"import playwright; print\\(playwright.__file__\\)\")",
+      "Bash(find / -name \"async_api.py\" -path \"*/playwright/*\")",
+      "Read(//usr/local/lib/**)",
+      "Read(//usr/lib/python3/dist-packages/**)",
+      "Bash(pip3 list *)",
+      "Bash(BashOutput bz7qu119m *)",
+      "Bash(dpkg -l python3*)",
+      "Bash(awk '{print $2}')",
+      "Bash(env python3 *)",
+      "Read(//usr/bin/**)",
+      "Bash(/usr/bin/python3.14 -c \"import playwright; print\\(playwright.__file__\\)\")",
+      "Bash(/usr/bin/python3 -c \"import playwright; print\\(playwright.__file__\\)\")",
+      "Bash(pip list *)",
+      "Read(//mnt/c/Users/jerron/AppData/Local/Programs/**)",
+      "Bash(/mnt/c/Users/jerron/AppData/Local/Programs/Python/Python311/python.exe -c \"import playwright; print\\('found'\\)\")",
+      "Bash(/mnt/c/Users/jerron/AppData/Local/Microsoft/WindowsApps/python3.exe -c \"import playwright; print\\('found'\\)\")",
+      "Bash(/home/jerron/voracle-env/bin/python3 *)",
+      "Bash(grep -v \"^[0-9]*$\")",
+      "Bash(env)",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\"; cat {}')",
+      "Bash(chmod +x *)",
+      "Bash(grep -v \"^$\")",
+      "Write",
+      "Read",
+      "Edit",
+      "Bash"
+    ]
+  }
+}

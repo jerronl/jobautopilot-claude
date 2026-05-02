@@ -30,401 +30,235 @@ requires:
     - USER_LINKEDIN
   bins:
     - python3
-metadata:
-  clawdbot:
-    emoji: "📄"
-    requires:
-      env:
-        - RESUME_DIR
-        - RESUME_OUTPUT_DIR
-        - RESUME_TEMPLATE
-        - MD_TO_DOCX_SCRIPT
-        - JOB_SEARCH_TRACKER
-        - USER_FIRST_NAME
-        - USER_LAST_NAME
-        - USER_EMAIL
-        - USER_PHONE
-        - USER_LINKEDIN
-      bins:
-        - python3
-      pip:
-        - python-docx
-        - lxml
-    files:
-      - scripts/md_to_docx.py
 ---
 
 # Job Autopilot — Resume Tailor
 
-Produces a tailored resume and cover letter for each `shortlist` job in the tracker. Delivers `.docx` files ready to attach and send.
-
-## What "good tailoring" means
-
-Good tailoring is **not** keyword stuffing and **not** pretending the user has done a job they only partially match.
-
-Good tailoring means:
-
-- correctly identifying what the hiring manager is really screening for
-- selecting the strongest real evidence from the user's resume pool and projects
-- building a believable bridge when the user is adjacent to the role rather than a perfect match
-- avoiding unsupported niche terminology and inflated claims
-- making the final documents feel specific to **this** company and **this** role, not reusable templates
-
 ## Core principles
 
-1. **100% truthful** — never invent experience, inflate metrics, fabricate credentials, or imply direct ownership where the source material only shows adjacency.
-2. **Source material first** — always read `$RESUME_DIR` before writing anything. Resume content must come from the user's original files and clearly grounded project evidence.
-3. **One resume per job, no exceptions** — every `shortlist` job gets its own dedicated resume and cover letter file. Never group jobs into archetypes. Never reuse a finished file across multiple jobs, even if the roles look similar. If a file already exists on disk for a `shortlist` job, overwrite it.
-4. **Diagnosis before drafting** — never start rewriting from raw keyword matching. First diagnose the role, then map evidence, then draft.
-5. **Believable bridge over fake identity** — for specialized roles, prefer "adjacent but credible" language over unsupported direct-identity claims.
-6. **Evidence beats buzzwords** — every strong claim in summary, skills, experience, and projects must map to concrete source evidence.
-7. **Projects are real evidence, not decoration** — actively evaluate side projects and GitHub work when they materially improve fit. Skip the PROJECTS section entirely when the resume pool has no relevant projects or the role does not benefit from them.
-8. **Never build a resume docx with python-docx directly** — the only permitted way to produce a resume `.docx` is: write a `.md` file in the exact custom format, then run `md_to_docx.py` with the template. Building the resume from scratch with `python-docx` is forbidden because it breaks template formatting.
-9. **Markdown before docx** — complete markdown drafts for all targeted jobs first, then convert to docx in batch. Do not interleave writing and conversion.
-10. **One job at a time for reporting** — finish and report each job's result before moving to the next.
-11. **No silent spinning** — if a job cannot be reliably completed within 30 minutes, mark it `error` with a clear reason and move on.
+1. **100% truthful** — never invent experience, inflate metrics, or fabricate credentials.
+2. **Source material first** — read `$RESUME_DIR` before writing anything.
+3. **One resume per job** — every shortlist job gets its own file, even if roles look similar. If a file already exists on disk, overwrite it.
+4. **Diagnosis before drafting** — diagnose the role, map evidence, then draft.
+5. **Adjacent but credible** over unsupported direct-identity claims.
+6. **Evidence beats buzzwords** — every strong claim must map to concrete source evidence.
+7. **Never build docx with python-docx directly** — write `.md`, run `md_to_docx.py`.
+8. **Markdown before docx** — complete all `.md` drafts first, then batch-convert.
 
-## Setup
+## What good tailoring means
 
-Add to `~/.jobautopilot/config.sh`:
-
-```bash
-export RESUME_DIR="$HOME/Documents/jobs/"
-export RESUME_OUTPUT_DIR="$HOME/Documents/jobs/tailored/"
-export RESUME_TEMPLATE="/path/to/jobautopilot-claude/skills/tailor/scripts/sample_placeholders.docx"
-export MD_TO_DOCX_SCRIPT="/path/to/jobautopilot-claude/skills/tailor/scripts/md_to_docx.py"
-export JOB_SEARCH_TRACKER="$HOME/.jobautopilot/workspace/job_application_tracker.md"
-export USER_FIRST_NAME="Your"
-export USER_LAST_NAME="Name"
-export USER_EMAIL="your@email.com"
-export USER_PHONE="+1-555-000-0000"
-export USER_LINKEDIN="https://linkedin.com/in/yourprofile"
-mkdir -p "$RESUME_OUTPUT_DIR"
-```
+- Correctly identifying what the hiring manager is really screening for
+- Selecting the strongest real evidence from the user's background — not keyword stuffing
+- Building a believable bridge when the user is adjacent, not pretending direct experience
+- Avoiding unsupported niche terminology and inflated claims
+- Making documents feel specific to **this** company and **this** role — not reusable templates
 
 ## Session start
 
-Read in order:
+1. Read all files in `$RESUME_DIR`.
+2. Read `$JOB_SEARCH_TRACKER` — find `shortlist` entries to process.
 
-1. `$RESUME_DIR` — understand the user's full experience, tools, assets, projects, and previous tailoring patterns
-2. `$JOB_SEARCH_TRACKER` — find the job(s) to process
-
-If the prompt specifies a single job, process only that entry. If no specific job is named, process all `shortlist` entries.
+If the prompt names a specific job, process only that entry. Otherwise process all `shortlist` entries.
 
 ## JD fetch order
 
-For each shortlist job:
+1. Use exact URL from tracker.
+2. Try `web_search` first to extract JD.
+3. If no useful JD, use browser to open URL.
+4. If URL is broken or wrong role → `error`.
 
-1. Use the exact URL from the tracker
-2. Try `web_search` first to extract job responsibilities, skills, keywords, asset classes, product scope, team context, and company-specific hooks
-3. If `web_search` returns no useful JD, use browser to open the URL directly
-4. If the URL is broken, a generic careers page, or wrong role, mark tracker `error` and explain why
+## Content production
 
-## Content production order
+### Step 1 — Extract source material
 
-For each job, strictly in this sequence:
+Read all files in `$RESUME_DIR`: work history, bullets, metrics, tools, projects, certifications. Build a raw evidence inventory. Do not invent anything not present in the files.
 
-### Step 1 — Read and extract source material
+### Step 1.5 — Diagnose the role
 
-Read all files in `$RESUME_DIR`. The pool may contain:
+Produce an internal diagnosis:
 
-| File type                          | What to extract                                                      |
-| ---------------------------------- | -------------------------------------------------------------------- |
-| Master resume (`.docx` / `.pdf`)   | Full work history, bullets, metrics, dates, tools, products, systems |
-| Older tailored versions            | Strong phrasing that remains truthful and role-appropriate           |
-| Cover letter drafts                | Preferred voice, opening formulas, recurring themes                  |
-| Skills list / bio (`.md` / `.txt`) | Certifications, tools, side projects, publications                   |
-| Project notes / GitHub summaries   | Side projects, methods used, end-user outcomes, technical stacks     |
+- `role_family`: `execution` | `quant_dev` | `data_engineering` | `applied_ai` | `ml_engineering` | `research_platform` | `other`
+- `seniority`: `junior` | `mid` | `senior` | `lead`
+- `company_hook`: one sentence on what is distinctive about this company/team
+- `must_prove`: top 3 capabilities the hiring manager screens for
+- `nice_to_have`: up to 3 secondary signals
+- `evidence_pool`: specific jobs/bullets/projects that support each `must_prove`
+- `gaps`: areas where the user is adjacent, not direct
+- `bridge_strategy`: how to position adjacency credibly
 
-Extract everything factual. Build a raw evidence inventory containing: companies, titles, dates, tools/languages, asset classes, methods/models, systems built or supported, users/stakeholders, metrics and scale indicators, side projects and patents if present.
+Do not start rewriting until this is complete. If `evidence_pool` is empty for a `must_prove` item, downgrade or drop it.
 
-Do not invent anything not present in the files or clearly linked project evidence.
+### Step 1.6 — Evidence matrix
 
-### Step 1.5 — Diagnose the role before tailoring
+For every claim candidate, record:
 
-Before writing any resume or cover letter content, produce an internal role diagnosis with these fields:
+- `claim`, `section`, `source`, `support_level` (`exact` | `reasonable_paraphrase` | `too_speculative`), `notes`
 
-- `role_family`: one of `execution`, `quant_dev`, `data_engineering`, `applied_ai`, `ml_engineering`, `research_platform`, `other`
-- `seniority`: `junior`, `mid`, `senior`, `lead`
-- `company_hook`: one sentence on what is distinctive about this company/team from the JD
-- `must_prove`: the top 3 capabilities the hiring manager is likely screening for
-- `nice_to_have`: up to 3 secondary signals that would strengthen fit
-- `evidence_pool`: specific jobs, bullets, projects, or files from `$RESUME_DIR` that support each `must_prove` item
-- `gaps`: the main missing areas where the user is only adjacent, not direct — these dictate what NOT to claim and where bridge language is required
-- `bridge_strategy`: how to position adjacency credibly without pretending direct experience
+Only `exact` and `reasonable_paraphrase` claims may appear in output. Remove or downgrade `too_speculative`.
 
-Do not start rewriting until this diagnosis is complete.
+### Adjacency rule
 
-If `evidence_pool` is empty for a `must_prove` item, downgrade or drop that item. Never fill a gap with invented language.
-
-### Step 1.6 — Build an evidence matrix
-
-Create an internal evidence matrix before drafting.
-
-For every claim candidate you may want to use in the tailored documents, record:
-
-- `claim`
-- `section`: summary / skills / experience / project / cover_letter
-- `source`
-- `support_level`: `exact`, `reasonable_paraphrase`, or `too_speculative`
-- `notes`
-
-Rules:
-
-- Only `exact` and `reasonable_paraphrase` claims may appear in output
-- `too_speculative` claims must be removed or downgraded
-- The more niche, senior, or specialized a term is, the stronger the evidence required
-
-### Evidence mapping rule
-
-Every strong claim in SUMMARY, CORE SKILLS, EXPERIENCE, PROJECTS, and the cover letter must map to at least one concrete source fact.
-
-Examples:
-
-- Allowed: "built Python modules for batch risk generation" when source clearly states that
-- Allowed: "research-to-production turnaround" when the source clearly shows fast translation from models to production
-- Not allowed: "HFT execution engineer" if the user only has execution-adjacent infrastructure experience
-- Not allowed: "market microstructure expert" if source does not show order-book or execution-quality work
-
-### Adjacency rule for specialized roles
-
-When the user is in `gaps` territory for the target role, write a bridge narrative instead of pretending identity.
+When the user is in `gaps` territory, write a bridge narrative — do not claim identity.
 
 Good:
-
 - "front-office quant developer with execution-adjacent infrastructure experience"
 - "quantitative engineer with strong research-to-production pipeline experience"
-- "data engineer with deep quantitative analytics background"
 
 Bad:
-
 - "HFT execution engineer" without direct source support
-- "market data engineer" when the source mostly shows risk/valuation data pipelines
-- "ML scientist" when the source mainly shows applied modeling or side-project work
+- "market data engineer" when source mostly shows risk/valuation pipelines
+- "ML scientist" when source mainly shows applied modeling or side-project work
 
 ### Specialized-term safety rule
 
-For niche roles such as HFT, low-latency systems, market microstructure, deep RL, LLM agents, or production ML platforms:
-
-- do not introduce specialized terms unless the resume pool contains direct evidence or a clearly adjacent supporting fact
-- if a JD term is attractive but unsupported, either omit it or rewrite at a more defensible abstraction level
-- when in doubt, a believable bridge beats an unsupported buzzword
-
-Examples:
-
-- Prefer "production trading systems" over "low-latency execution stack" unless low-latency evidence is explicit
-- Prefer "time-series forecasting" over "alpha signal modeling" unless source supports direct alpha ownership
-- Prefer "AI automation workflow" over "agentic orchestration platform" unless the project materials clearly support that wording
+Do not introduce niche terms (HFT, low-latency, market microstructure, deep RL, LLM agents, production ML platforms) unless the resume pool contains direct evidence. When in doubt:
+- "production trading systems" not "low-latency execution stack" unless latency evidence is explicit
+- "time-series forecasting" not "alpha signal modeling" unless source supports direct alpha ownership
+- "AI automation workflow" not "agentic orchestration platform" unless project materials clearly support it
 
 ### Project selection policy
 
-Projects are **optional**. Include a PROJECTS section only when BOTH conditions hold:
-1. The resume pool actually contains relevant project evidence
-2. The role meaningfully benefits from project signal (e.g., the user is bridging into a new area, the role values independent initiative, or a project directly supports a `must_prove` item)
+Include PROJECTS only when BOTH hold: (1) resume pool has relevant project evidence, and (2) the role benefits from project signal (bridging into a new area, role values initiative, or a project directly supports a `must_prove` item).
 
-When including PROJECTS, pick up to 3 projects. Prefer:
+When including, pick ≤ 3. Prefer:
+1. Original projects over forks
+2. Projects that directly support a `must_prove` item
+3. Projects with a clear problem → method → outcome story
+4. Projects showing independent initiative or end-to-end ownership
 
-1. original projects over forks
-2. projects that directly support a `must_prove` item
-3. projects with a clear problem → method → outcome story
-4. projects that show independent initiative or end-to-end ownership
+For forks: only include when the user's modifications are substantial and clearly documented in source material.
 
-Do not include a project just because it contains matching buzzwords.
+Do not include a project because it contains matching buzzwords.
 
-For each included project, state:
+### Step 2 — Draft resume markdown
 
-- the problem solved
-- the method / system built
-- the end-user, production, or workflow outcome
+Drive rewrite from diagnosis + evidence matrix. Priorities:
 
-If a project is a fork, only include it when the user's modifications are substantial and clearly documented in the source material.
+1. Make the 3 `must_prove` items visible in the first half page
+2. Believable role identity in summary
+3. Strongest evidence in the first 1–2 jobs
+4. Company- and role-specific wording where supported
+5. Honor `gaps` — do not claim what the user does not have
 
-When the conditions above are not met, omit the entire PROJECTS section from the markdown — `md_to_docx.py` will automatically remove the PROJECTS table and all unused PROJ placeholders from the output docx.
+Save to: `$RESUME_OUTPUT_DIR/${USER_FIRST_NAME}_<Company>_<Title>_Resume_2026.md`
 
-### Resume markdown format specification
+### Resume markdown format
 
-⚠️ **This is NOT standard Markdown.** `md_to_docx.py` uses a custom line-based parser. Standard Markdown headings (`#`, `##`, `###`), bold (`**text**`), horizontal rules (`---`), and pipe tables will all silently break parsing. Do not use any of those constructs.
-
-**WRONG — standard Markdown (do not use):**
-
-```text
-# Jane Doe
-**New York | jane@example.com**
----
-## SUMMARY
-...
-### Associate Director | DTCC
-**New York, NY | 2024–Present**
-- bullet
-```
-
-**CORRECT — custom format required by md_to_docx.py:**
+⚠️ **Custom format — NOT standard Markdown.** Do not use `#`, `##`, `**bold**`, `---`, or pipe tables.
 
 ```text
 Full Name
 email@example.com | +1-555-000-0000 | https://linkedin.com/in/profile | City, ST
 
 SUMMARY
-Two to three sentences summarizing the candidate.
+Two to three sentences.
 
 CORE SKILLS
-List of skills, tools, and technologies relevant to this role.
+List of skills and tools.
 
 EXPERIENCE
 Most Recent Job Title — Company Name | City, ST | Jan 2022 – Present
-• Accomplished X by doing Y, resulting in Z
-• Another bullet point with a metric
+• Bullet with metric
+• Bullet
 
-Second Most Recent Title — Company Name | City, ST | Jun 2019 – Dec 2021
-• Bullet point
-• Bullet point
+Earlier Title — Company Name | City, ST | Jun 2019 – Dec 2021
+• Bullet
 
 PROJECTS
 Project Name
-• Problem solved, method used, outcome achieved
-• Additional detail if needed
-
-Another Project
 • Problem → method → outcome
 
 EARLIER EXPERIENCE
 Earlier Role — Company, Year–Year
-Another Earlier Role — Company, Year–Year
 
 EDUCATION
 University Name — Degree, Major (Year)
 ```
 
-**Parsing rules the script enforces — follow these exactly:**
+| Element | Rule |
+|---|---|
+| Line 1 | Full name, no `#` |
+| Line 2 | `email \| phone \| linkedin \| City, ST` — no zip, no street |
+| Section headers | ALL CAPS, no `##` |
+| Job header | `Title — Company \| Location \| Date` |
+| Job order | Reverse chronological |
+| Bullets | `•` or `-` |
+| PROJECTS | Optional — omit entirely when not warranted |
+| Earlier experience | One line per entry, no bullets |
 
-| Element            | Rule                                                                                                                                          |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Line 1             | Full name, plain text, no `#` heading marker                                                                                                  |
-| Line 2             | Contact info, pipe-separated: `email \| phone \| linkedin_url \| City, ST` — no zip codes, no street address                                  |
-| Section headers    | ALL CAPS, no `##` — exactly `SUMMARY`, `CORE SKILLS`, `EXPERIENCE`, `PROJECTS` (optional), `EARLIER EXPERIENCE`, `EDUCATION`                  |
-| Job header         | `Title — Company \| Location \| Date range` — separator is ` — ` (em dash with spaces), fields separated by ` \| `                            |
-| Job order          | **Reverse chronological — most recent job first**                                                                                             |
-| Bullets            | Start with `•` or `-`, one per line                                                                                                           |
-| Project header     | Single line, just the project name (no `—`, no `\|`). Followed by `•`/`-` bullets                                                             |
-| PROJECTS section   | **Optional.** Omit entirely when not warranted — the script removes the PROJECTS table and all unused placeholders automatically              |
-| Earlier experience | **One line per entry, no bullets**: `Role — Company, Year–Year`                                                                               |
-| Education          | One line per entry: `University — Degree`                                                                                                     |
-
-**What the script handles automatically:**
-- More jobs/projects than template slots → clones the last item's formatting
-- Fewer jobs/projects than template slots → removes unused placeholders
-- No PROJECTS section in markdown → removes the entire PROJECTS table from docx
-- Same logic for bullets, earlier experience, and education entries
-
-### Step 2 — Draft the resume markdown
-
-Drive the rewrite from the Step 1.5 diagnosis and Step 1.6 evidence matrix, not from raw keyword matching.
-
-Priorities:
-
-1. Make the 3 `must_prove` items visible in the first half page
-2. Build a believable role identity in the summary
-3. Surface the strongest supporting evidence in the first 1–2 jobs
-4. Use company- and role-specific wording where supported
-5. Honor `gaps` — do not claim what the user does not have
-6. Prefer precise, grounded phrasing over impressive but risky wording
-
-The summary may state at most 2–3 of the strongest, most defensible positioning angles. Do not use the summary to preload capabilities the body cannot support.
-
-If the role is specialized and the user is only adjacent, explicitly tailor toward adjacency, not identity.
-
-Save to: `$RESUME_OUTPUT_DIR/${USER_FIRST_NAME}_<Company>_<Title>_Resume_2026.md`
-
-### Self-check before converting to docx
-
-Before running `md_to_docx.py`, verify the markdown against these rules:
+### Self-check before docx conversion
 
 ```bash
-# Line 1 must be plain name (no # prefix)
-head -1 resume.md
-
-# Line 2 must contain pipes (contact info)
-sed -n '2p' resume.md | grep '|'
-
-# Section headers must be ALL CAPS with no ## prefix
-grep -E '^[A-Z ]+$' resume.md
-
-# Job headers must match: Title — Company | Location | Date
-grep -E '^.+ — .+ \| .+ \| .+$' resume.md
-
-# Bullets must start with • or -
-grep -E '^[•\-]' resume.md
+head -1 resume.md                          # plain name, no #
+sed -n '2p' resume.md | grep '|'           # contact with pipes
+grep -E '^[A-Z ]+$' resume.md              # ALL CAPS section headers
+grep -E '^.+ — .+ \| .+ \| .+$' resume.md # job headers
+grep -E '^[•\-]' resume.md                 # bullets
 ```
 
-If any check fails, fix the markdown before proceeding.
+Convert: `~/voracle-env/bin/python3 $MD_TO_DOCX_SCRIPT <resume.md> <output.docx> $RESUME_TEMPLATE`
 
-**After running md_to_docx.py, verify the output docx has the correct structure:**
-
+Verify output:
 ```bash
-~/voracle-env/bin/python3 - << 'EOF'
+~/voracle-env/bin/python3 -c "
 from docx import Document
-doc = Document("output.docx")
-print("Tables:", len(doc.tables))   # 5 (no PROJECTS) or 6 (with PROJECTS)
-print("Paras:", len(doc.paragraphs))
-EOF
+doc = Document('output.docx')
+print('Tables:', len(doc.tables))  # 5 (no PROJECTS) or 6 (with PROJECTS)
+"
 ```
 
-If `Tables: 0`, the template was not used — the markdown format was wrong. Fix the .md and re-run. Do NOT proceed with a docx that has 0 tables.
+If `Tables: 0` → template not used, markdown format was wrong. Fix and re-run.
 
 ### Content QA gate
 
-Before converting markdown to docx, verify ALL of the following. If any check fails, revise the markdown.
+Before converting, verify:
+- Summary states believable role identity, not generic or inflated
+- First half page reflects top 3 JD priorities
+- Every strong claim has `exact` or `reasonable_paraphrase` evidence
+- No unsupported niche terms
+- Cover letter has at least one company-specific hook (not swappable to another firm)
 
-- The summary states a believable role identity, not a generic one and not an inflated one
-- The first half page clearly reflects the top 3 JD priorities from the diagnosis
-- Every strong claim has source evidence classified as `exact` or `reasonable_paraphrase`
-- No specialized or niche terms were introduced without support
-- The wording sounds like this user, not a generic senior engineer template
-- If you replaced the company name with another firm in the same family, the document would **not** still fit unchanged
-- For specialized roles, the resume shows domain-specific evidence rather than generic synonyms
-- The document highlights differentiators that actually matter for this role, including projects when appropriate
-- If PROJECTS section is present, every listed project genuinely strengthens fit (not buzzword padding); if absent, that decision was deliberate
+### Known failure modes
 
-### Step 3 — Draft the cover letter markdown
+- Treating partial evidence verification as good enough — every strong claim needs a source
+- Using role keywords as a substitute for real evidence ("experienced in low-latency systems" with no latency work in history)
+- Writing summaries that overstate direct experience in gap areas
+- Inserting unsupported niche terms to sound impressive
+- Writing company-generic cover letters that could be sent to any firm
+- Ignoring strong side projects that materially improve fit for a specific role
+- Including projects just to fill the PROJECTS section when they don't strengthen fit
+- Treating "text looks right" as equivalent to "docx is deliverable" — always verify table count
+- Spending more than 30 minutes on one job without reporting status
 
-Three paragraphs max:
+### Step 3 — Draft cover letter markdown
 
-1. Why this role + company — **must include at least one company-specific hook** drawn from the JD, business model, asset focus, product scope, research style, or execution model. A paragraph that would still read correctly after swapping the company name is a failure.
-2. Most relevant evidence match — 2 to 3 specific points tied to source evidence
-3. Brief close
+Three paragraphs: (1) why this role + company with company-specific hook, (2) 2–3 evidence matches, (3) brief close.
 
 Rules:
-
-- Do not write a company-agnostic opening
-- Do not simply restate the summary from the resume
-- Do not overclaim niche expertise that the resume itself only bridges indirectly
-- The cover letter should sound slightly more human and motivated than the resume, but remain factual and specific
+- Do not write a company-agnostic opening — a paragraph that still reads correctly after swapping the company name is a failure
+- Do not restate the resume summary
+- Do not overclaim niche expertise the resume only bridges indirectly
+- Sound slightly more human and motivated than the resume, but remain factual and specific
 
 Save to: `$RESUME_OUTPUT_DIR/${USER_FIRST_NAME}_<Company>_<Title>_Cover_Letter_2026.md`
 
 ### Step 4 — Update tracker
 
-- Success → `resume_ready`, record the markdown file paths in `resume_path` and `cover_letter_path`
-- Cannot complete → `error`, write a clear reason in Notes
+- Success → `resume_ready`, record `.md` file paths in `resume_path` and `cover_letter_path`
+- Cannot complete → `error` with reason in Notes
 
 ### Step 5 — Report
 
-Report:
+Company, title, files written, top positioning angle, any issues.
 
-- company
-- title
-- files written
-- top positioning angle used
-- any issues or confidence warnings
-
-## File naming convention
+## File naming
 
 ```
 ${USER_FIRST_NAME}_<CompanyName>_<JobTitle>_Resume_2026.docx
 ${USER_FIRST_NAME}_<CompanyName>_<JobTitle>_Cover_Letter_2026.docx
 ```
 
-Spaces → underscores. Keep company and title short (≤ 20 chars each if possible).
+Spaces → underscores. Company and title ≤ 20 chars each.
 
 ## Tracker status flow
 
@@ -432,23 +266,3 @@ Spaces → underscores. Keep company and title short (≤ 20 chars each if possi
 shortlist → tailoring → resume_ready
                      ↘ error
 ```
-
-## Known failure modes to avoid
-
-- treating partial verification as good enough
-- using role keywords as a substitute for real evidence
-- writing summaries that overstate direct experience
-- inserting unsupported niche terms to sound impressive
-- writing company-generic cover letters
-- ignoring strong side projects that materially improve fit
-- including projects just to fill the section when they don't strengthen fit
-- treating "text looks right" as equivalent to "docx is deliverable"
-- spending more than 30 minutes on one job without reporting status
-
-## Scope
-
-Resume tailoring only. Do not submit applications. Hand off `resume_ready` entries to the `jobautopilot-submitter` skill.
-
-## Support
-
-If Job Autopilot saved you time: paypal.me/ZLiu308

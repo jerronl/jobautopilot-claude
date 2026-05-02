@@ -81,6 +81,37 @@ Pick the category that looks closest to "Career Site" / "Job Board" / "LinkedIn"
 - **`.fill("LinkedIn")` does NOT trigger filtering.** It sets the input value without dispatching React keystroke handlers. Use the drill-down click approach, not typed filtering.
 - The widget shows "Expanded" in its text while the popup is open — that's a status hint, not an error.
 
+## Step 3: My Experience — date inputs (work experience + education)
+
+Each entry has 3-segment date inputs that share the same React-blur bug as the disability date (step 6):
+- `#workExperience-N--startDate-dateSectionMonth-input` / `-dateSectionYear-input`
+- `#workExperience-N--endDate-dateSectionMonth-input`   / `-dateSectionYear-input`
+- `#education-N--firstYearAttended-dateSectionYear-input` (year-only)
+- `#education-N--lastYearAttended-dateSectionYear-input`  (year-only)
+
+`fill` writes the segment value but Workday only validates and commits the date on **blur**. Clicking the Next button does NOT blur the field first — validation runs against stale state and you get "Enter a valid date" / "This field is required" errors despite the segments visibly showing values. This was confirmed on `blackrock.wd1.myworkdayjobs.com` 2026-04-29 (workExperience-12 dates wouldn't commit).
+
+**Verified working sequence — fill all segments, then click an unrelated field to blur, THEN click Next:**
+
+```json
+{"type":"fill","selector":"#workExperience-12--startDate-dateSectionMonth-input","value":"1"}
+{"type":"fill","selector":"#workExperience-12--startDate-dateSectionYear-input","value":"2024"}
+{"type":"fill","selector":"#workExperience-12--endDate-dateSectionMonth-input","value":"12"}
+{"type":"fill","selector":"#workExperience-12--endDate-dateSectionYear-input","value":"2024"}
+{"type":"click","selector":"#workExperience-12--companyName"}
+{"type":"wait","ms":500}
+{"type":"click","selector":"[data-automation-id='pageFooterNextButton']"}
+```
+
+The blur target can be any non-date field on the page (companyName, jobTitle, the page heading, etc.). After clicking it, the date segments visually re-render with their committed values — that's how you know the commit happened.
+
+### Gotchas
+
+- **Never use `press Tab` between segments.** Same corruption as step 6 — month jumps to "12".
+- **Do not chain Next directly after fills.** Always blur first.
+- **Year-only fields (`firstYearAttended`)** behave identically — fill, then blur via another field, then proceed.
+- If `fill` still doesn't commit after blur (rare on some tenants), switch to `type` action which simulates real keystrokes with delay and triggers React's onKeyDown.
+
 ## Generic Workday dropdowns (`#education-NNN--degree`, `#personalInfoUS--gender`, etc.)
 
 These are simpler than multiselect — single-select button openers. Verified sequence:
@@ -113,6 +144,47 @@ Final step has a Submit button instead of Next:
 
 Verify submission by checking for confirmation phrases in `page.text` ("thank you", "application received", "we've received your application") or URL change to a `/thankYou` or `/Success` path.
 
+## Step 6: Self Identify — disability date field
+
+The CC-305 disability self-identification form has a Date field split into 3 text inputs:
+- `#selfIdentifiedDisabilityData--dateSignedOn-dateSectionMonth-input` (Month)
+- `#selfIdentifiedDisabilityData--dateSignedOn-dateSectionDay-input` (Day)
+- `#selfIdentifiedDisabilityData--dateSignedOn-dateSectionYear-input` (Year)
+
+Server-side validation requires the date to match the browser's exact current local date ("Enter today's date" error otherwise).
+
+**CRITICAL: Do NOT use Tab between fills.** The Tab key corrupts adjacent date segments (month jumps to "12"). 
+
+**Working approach (verified 2026-04-21, PwC wd3) — USE THE CALENDAR PICKER:**
+
+The `fill` action on date segment inputs often causes Tab corruption (month jumps to "12") even when filling individually. The ONLY fully reliable method is the calendar date picker:
+
+1. Click the calendar icon to open the picker:
+```json
+{"type":"click","selector":"div[aria-label='Calendar']"}
+{"type":"wait","ms":500}
+```
+2. The picker opens on the month matching the current input values. Navigate to today's month using "Previous month"/"Next month" buttons:
+```json
+{"type":"click","selector":"button[aria-label='Previous month']"}
+```
+3. Once on the correct month, click today's date button (aria-label includes "Today"):
+```json
+{"type":"click","selector":"button[aria-label='Today Tuesday 21 April 2026']"}
+{"type":"wait","ms":500}
+```
+4. Click the Name field to blur and commit:
+```json
+{"type":"click","selector":"#selfIdentifiedDisabilityData--name"}
+```
+5. Verify all 3 values are correct and errors array is empty before clicking Save and Continue.
+
+**Fallback (may work on some tenants):** Fill each segment individually with `fill` action (no Tab), then click a different field to blur. But if month keeps reverting to "12", switch to the calendar approach above.
+
+**Important:** Always check browser's actual local date via `evaluate` (`new Date()`) — don't trust the system prompt's "Today's date" which may be off by timezone.
+
+The disability checkbox radio group (`disabilityStatus`) uses long hex IDs. After clicking one option, the others become `disabled: true`. Use `[id='<hex>-disabilityStatus']` as selector.
+
 ## click_filter anti-bot overlay (some tenants)
 
 Some Workday tenants (confirmed: `geico.wd1.myworkdayjobs.com`) place a `<div data-automation-id="click_filter" aria-label="Create Account" role="button">` overlay on top of the actual submit button (`data-automation-id="createAccountSubmitButton"` / `signInSubmitButton`). The actual button has `tabindex="-2"`.
@@ -122,4 +194,11 @@ This div is a reCAPTCHA/anti-bot gate:
 - Hiding the overlay (`display:none` / `pointer-events:none`) and clicking the underlying button succeeds as a click but the server silently rejects (no reCAPTCHA token).
 - `form.submit()` via JS reloads the page without advancing.
 
-**No known automated workaround.** Use `wait_human_login` to ask the user to click the button manually. If user doesn't act, mark as `blocked: workday_click_filter_recaptcha`.
+**Verified workaround (2026-04-20, GEICO):** Use `click_humanized` instead of `click`. This action scrolls the element into view, warms up the mouse with random movements around the page, then approaches and clicks with position jitter — sufficient to pass the `isTrusted` + behavioral checks.
+
+```json
+{"type":"click_humanized","selector":"[data-automation-id=\"click_filter\"]"}
+{"type":"wait","ms":4000}
+```
+
+If `click_humanized` also fails, fall back to `wait_human_login`. If user doesn't act, mark as `blocked: workday_click_filter_recaptcha`.

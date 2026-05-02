@@ -1,8 +1,10 @@
 """Orchestrator — coordinates search → tailor → submit pipeline."""
+import datetime
 import os
 import re
 import anyio
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from claude_agent_sdk import (
     query, ClaudeAgentOptions, ResultMessage, AssistantMessage, TextBlock,
     ThinkingBlock, ToolUseBlock, TaskStartedMessage, TaskProgressMessage,
@@ -237,7 +239,7 @@ by delegating to specialized subagents using the Agent tool.
    and search can be running in parallel.
 
 3. **job-submitter** — Submits applications via iterative code-act loop (write actions JSON →
-   run submit_runner.py → read page state → repeat). Handles its own execution loop internally.
+   run the browser runner → read page state → repeat). Handles its own execution loop internally.
    Invoke when: tracker has `resume_ready` or `blocked` entries.
    After it returns, relay its output line by line using `[Submitter]` prefix.
 
@@ -255,15 +257,21 @@ If the user's prompt contains a shortlist count (e.g. "stop after 10 shortlists"
 Immediately after reading the tracker (step 1 below), before launching any agents:
 
 1. Find the first 5 `blocked` entries in the tracker that have a URL in their Notes field.
-2. Open them in the background using Bash:
+2. For each blocked job, find the actual stuck URL by grepping the progress log:
+   ```bash
+   grep "<job_id>" "$RESUME_OUTPUT_DIR/state/submit_progress.log" | grep "ended on" | tail -1
+   ```
+   The line contains the URL after the colon (e.g. `ended on captcha: https://...`).
+   Fall back to `$RESUME_OUTPUT_DIR/state/<job_id>/tab_url.txt`, then the Notes URL.
+3. Open them in the background using Bash:
    ```bash
    ~/voracle-env/bin/python3 "$BROWSER_LOGIN_SCRIPT" \
-     "$RESUME_OUTPUT_DIR/state/_browser/user_data" \
+     "$SUBMIT_BROWSER_PROFILE_DIR" \
      '["url1","url2","url3","url4","url5"]' &
    ```
-3. Print one line per URL opened:
+4. Print one line per URL opened:
    `[Orchestrator] 🌐 Opened for manual review: Company — Role (url)`
-4. Continue immediately — do not wait for the user.
+5. Continue immediately — do not wait for the user.
 
 This lets the user log in and submit blocked jobs manually while the pipeline runs autonomously.
 
@@ -314,11 +322,11 @@ Rules:
 
 ## Read-only browser tasks — reuse the submitter's authenticated browser
 
-The submitter's Playwright browser (`submit_runner.py`) is a persistent, already-signed-in session for whatever the user regularly uses: Gmail, Outlook, LinkedIn, employer portals, ATS dashboards, webmail, Calendar, etc. It accumulates cookies across runs, so by the time you need to read something, the user is almost certainly already logged in there.
+The submitter's Playwright browser is a persistent, already-signed-in session for whatever the user regularly uses: Gmail, Outlook, LinkedIn, employer portals, ATS dashboards, webmail, Calendar, etc. It accumulates cookies across runs, so by the time you need to read something, the user is almost certainly already logged in there.
 
 If the user asks you to **look something up** rather than apply to jobs — check inbox, read a LinkedIn message thread, look at an interview calendar invite, verify an application status page, scrape an offer letter, open a webmail provider, check a recruiter reply, etc. — delegate to **job-submitter** with a read-only prompt like:
 
-> "Read-only task — do NOT submit any application. Use submit_runner.py to browse the site. Report findings back to me."
+> "Read-only task — do NOT submit any application. Browse the site using the browser runner. Report findings back to me."
 
 **Email scanning — read the BODY, not just the subject line.** Subject lines and snippets are not enough. Job-related emails often contain critical details inside the body: OA deadlines, interview scheduling links, background check forms, offer details, next-step instructions. When checking email:
 
@@ -343,7 +351,9 @@ Do NOT skip opening emails — a subject line like "Your application update" cou
 | "Application received" confirmation (for a row still in `blocked` or `resume_ready`) | Status → `applied`. Append `Confirmed applied via email <date>.` to notes. |
 | Draft / incomplete application reminder | Keep current status. Append `DRAFT REMINDER <date>: application saved but not submitted.` to notes. |
 
-Match conservatively — only update when you're confident the email corresponds to that tracker row. If a rejection email says "Senior Lead AI Engineer" and there are 3 Capital One AI roles, update only the one(s) whose title matches. When unsure, note the ambiguity and let the user decide.
+Match against **every row in the tracker** — do NOT restrict to a subset or "target companies". Every company the user has applied to is in the tracker and deserves an update if there is a matching email.
+
+"Conservatively" means: only update a specific row when you are confident the email matches that company + role. If a rejection email says "Senior Lead AI Engineer" and there are 3 Capital One AI roles, update only the one(s) whose title matches. When unsure which row, note the ambiguity in all candidate rows and let the user decide. It does NOT mean skip companies.
 
 Build the URL and evaluate queries from the user's request. Examples:
 - Gmail search: `https://mail.google.com/mail/u/0/#search/<query>` + evaluate `.zA` rows, then click into each
@@ -375,6 +385,46 @@ only when the user gives a generic prompt with no scope restriction.
 """
 
 
+# Fallback chain — when a model hits its rate limit, advance to the next.
+# Both short aliases (passed to subagents via AgentDefinition) and full IDs
+# (used for the orchestrator's own model) are mapped.
+_MODEL_FALLBACK = {
+    "sonnet":             "opus",
+    "claude-sonnet-4-6":  "claude-opus-4-7",
+    "opus":               "haiku",
+    "claude-opus-4-7":    "claude-haiku-4-5-20251001",
+    "haiku":              None,
+    "claude-haiku-4-5-20251001": None,
+}
+
+
+def _is_rate_limit(text: str) -> bool:
+    """Detect a Claude Code subscription rate-limit message in streamed text."""
+    t = text.lower()
+    return ("limit" in t and "resets" in t) or "hit your limit" in t
+
+
+def _rate_limit_wait_secs(err: str) -> int:
+    """Parse 'resets H[am/pm] (Timezone)' from a rate-limit error and return seconds to wait."""
+    m = re.search(r'resets\s+(\d+)([ap]m)\s+\(([^)]+)\)', err, re.I)
+    if m:
+        hour = int(m.group(1))
+        if m.group(2).lower() == 'pm' and hour != 12:
+            hour += 12
+        elif m.group(2).lower() == 'am' and hour == 12:
+            hour = 0
+        try:
+            tz = ZoneInfo(m.group(3))
+            now = datetime.datetime.now(tz)
+            reset = now.replace(hour=hour, minute=5, second=0, microsecond=0)
+            if reset <= now:
+                reset += datetime.timedelta(days=1)
+            return max(60, int((reset - now).total_seconds()))
+        except Exception:
+            pass
+    return 30 * 60  # default: wait 30 minutes
+
+
 async def run(prompt: str, stream: bool = True, headed: bool = True) -> str:
     env = base_env()
     env.update({
@@ -397,7 +447,9 @@ async def run(prompt: str, stream: bool = True, headed: bool = True) -> str:
         "SUBMIT_RUNNER":    str(SKILLS_DIR / "submitter" / "scripts" / "submit_runner.py"),
         "CREDENTIALS_FILE": os.environ.get("CREDENTIALS_FILE", str(WORKSPACE / "credentials.md")),
         "SEARCH_PROGRESS_LOG": str(WORKSPACE / "state" / "search_progress.log"),
-        "BROWSER_LOGIN_SCRIPT": str(REPO_ROOT / "scripts" / "browser_login.py"),
+        "BROWSER_LOGIN_SCRIPT":      str(REPO_ROOT / "scripts" / "browser_login.py"),
+        "BROWSER_RESTART_SCRIPT":    str(REPO_ROOT / "scripts" / "browser_restart.py"),
+        "SUBMIT_BROWSER_PROFILE_DIR": str(Path.home() / ".jobautopilot" / "browser_profiles" / "submit"),
         "USER_GENDER":      os.environ.get("USER_GENDER", ""),
         "USER_RACE":        os.environ.get("USER_RACE", ""),
         "USER_HISPANIC":    os.environ.get("USER_HISPANIC", ""),
@@ -435,47 +487,98 @@ async def run(prompt: str, stream: bool = True, headed: bool = True) -> str:
     _flush_line(f"[Orchestrator] starting — may take a minute to load, please be patient...")
 
     result = ""
-    async for message in query(
-        prompt=prompt,
-        options=ClaudeAgentOptions(
-            cwd=str(WORKSPACE),
-            allowed_tools=["Read", "Bash", "Agent"],
-            system_prompt=SYSTEM_PROMPT,
-            permission_mode="bypassPermissions",
-            model="claude-opus-4-6",
-            env=env,
-            agents={
-                "job-search":    search_def(headed),
-                "resume-tailor": tailor_def(headed),
-                "job-submitter": submitter_def(True),  # always headed — user may need to solve CAPTCHAs
-            },
-        ),
-    ):
-        if isinstance(message, AssistantMessage) and stream:
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    _stream_text(block.text)
-                elif isinstance(block, ThinkingBlock):
-                    pass  # internal reasoning — not shown
-                elif isinstance(block, ToolUseBlock):
-                    if block.name == "Agent":
-                        agent_name = block.input.get("name", "subagent")
-                        _stream_text(f"[Orchestrator] → launching {agent_name}...\n")
-                    elif block.name in ("Bash", "Read"):
-                        pass  # too noisy to print every read/bash
-        elif isinstance(message, TaskStartedMessage) and stream:
-            _clear_progress()
-            _stream_text(f"[task: {message.description}]\n")
-        elif isinstance(message, TaskProgressMessage) and stream:
-            _poll_submit_log()
-            _poll_search_log()
-            if message.last_tool_name:
-                _show_progress(message.last_tool_name)
-        elif isinstance(message, ResultMessage):
-            result = message.result
-            if stream:
-                if _line_buf:
-                    _flush_line(_line_buf)
-                print()
+    # Track current model for orchestrator + each subagent; advanced down
+    # _MODEL_FALLBACK on rate-limit hits.
+    orch_model      = "claude-sonnet-4-6"
+    search_model    = "haiku"
+    tailor_model    = "opus"
+    submitter_model = "sonnet"
+
+    while True:
+        # Captured rate-limit text from streamed output. The SDK raises a
+        # generic "Command failed with exit code 1" exception on rate limit,
+        # so we sniff the streamed TextBlock to know what actually happened.
+        rate_limit_text = ""
+        try:
+            async for message in query(
+                prompt=prompt,
+                options=ClaudeAgentOptions(
+                    cwd=str(WORKSPACE),
+                    allowed_tools=["Read", "Bash", "Agent"],
+                    system_prompt=SYSTEM_PROMPT,
+                    permission_mode="bypassPermissions",
+                    model=orch_model,
+                    env=env,
+                    agents={
+                        "job-search":    search_def(headed, model=search_model),
+                        "resume-tailor": tailor_def(headed, model=tailor_model),
+                        "job-submitter": submitter_def(True, model=submitter_model),  # always headed — user may need to solve CAPTCHAs
+                    },
+                ),
+            ):
+                if isinstance(message, AssistantMessage) and stream:
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            if _is_rate_limit(block.text):
+                                rate_limit_text = block.text
+                            _stream_text(block.text)
+                        elif isinstance(block, ThinkingBlock):
+                            pass  # internal reasoning — not shown
+                        elif isinstance(block, ToolUseBlock):
+                            if block.name == "Agent":
+                                agent_name = block.input.get("name", "subagent")
+                                _stream_text(f"[Orchestrator] → launching {agent_name}...\n")
+                            elif block.name in ("Bash", "Read"):
+                                pass  # too noisy to print every read/bash
+                elif isinstance(message, TaskStartedMessage) and stream:
+                    _clear_progress()
+                    _stream_text(f"[task: {message.description}]\n")
+                elif isinstance(message, TaskProgressMessage) and stream:
+                    _poll_submit_log()
+                    _poll_search_log()
+                    if message.last_tool_name:
+                        _show_progress(message.last_tool_name)
+                elif isinstance(message, ResultMessage):
+                    result = message.result
+                    if stream:
+                        if _line_buf:
+                            _flush_line(_line_buf)
+                        print()
+            break  # completed without rate-limit error
+        except Exception as e:
+            err = str(e)
+            hit = rate_limit_text if rate_limit_text else (err if _is_rate_limit(err) else "")
+            if hit:
+                # Try advancing every model that has a fallback. Switching all
+                # of them is the simplest correct behavior — we don't know
+                # exactly which model triggered the limit (the streamed text
+                # doesn't always say), and shared subscription tiers like
+                # "sonnet" are usually exhausted in lockstep across agents.
+                advanced = False
+                if _MODEL_FALLBACK.get(orch_model):
+                    orch_model = _MODEL_FALLBACK[orch_model]
+                    advanced = True
+                if _MODEL_FALLBACK.get(search_model):
+                    search_model = _MODEL_FALLBACK[search_model]
+                    advanced = True
+                if _MODEL_FALLBACK.get(tailor_model):
+                    tailor_model = _MODEL_FALLBACK[tailor_model]
+                    advanced = True
+                if _MODEL_FALLBACK.get(submitter_model):
+                    submitter_model = _MODEL_FALLBACK[submitter_model]
+                    advanced = True
+                if advanced:
+                    _flush_line(
+                        f"[Orchestrator] Rate limit — falling back to "
+                        f"orch={orch_model}, search={search_model}, "
+                        f"tailor={tailor_model}, submitter={submitter_model}"
+                    )
+                    continue
+                # No more fallbacks — sleep until the limit resets, then retry.
+                secs = _rate_limit_wait_secs(hit)
+                _flush_line(f"[Orchestrator] Rate limit — all fallbacks exhausted, resuming in {secs // 60} min...")
+                await anyio.sleep(secs)
+                continue
+            raise
 
     return result

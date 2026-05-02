@@ -19,10 +19,10 @@ it returns `status=needs_login` and you handle it via the steps below.
 Run this exact command right now:
 
 ```bash
-cat > /tmp/submit_login_check.json << 'EOF'
+cat > $TMPDIR/submit_login_check.json << 'EOF'
 {{
   "round": 0, "job_id": "login_check",
-  "browser_state_dir": "/tmp/submit_startup_state",
+  "browser_state_dir": "$TMPDIR/submit_startup_state",
   "actions": [
     {{"type": "navigate", "url": "https://www.linkedin.com/feed/"}},
     {{"type": "wait", "ms": 2000}},
@@ -32,8 +32,8 @@ cat > /tmp/submit_login_check.json << 'EOF'
   ]
 }}
 EOF
-mkdir -p /tmp/submit_startup_state
-~/voracle-env/bin/python3 {RUNNER_SCRIPT} /tmp/submit_login_check.json
+mkdir -p $TMPDIR/submit_startup_state
+python3 {RUNNER_SCRIPT} $TMPDIR/submit_login_check.json
 ```
 
 Read `page.needs_login` from the output. If LinkedIn is in there, run a SSO
@@ -42,7 +42,7 @@ attempt round BEFORE trying any password / wait_human_login flow:
 ```json
 {{
   "round": 1, "job_id": "login_check",
-  "browser_state_dir": "/tmp/submit_startup_state",
+  "browser_state_dir": "$TMPDIR/submit_startup_state",
   "actions": [
     {{"type": "navigate", "url": "https://www.linkedin.com/login"}},
     {{"type": "wait", "ms": 2500}},
@@ -66,9 +66,37 @@ password flow.
 
 ## After login check
 
+### ⛔ HARD RULE — no pre-judgment blocks. EVER.
+
+You may NEVER mark a job `blocked` without first executing `round_1.json`
+(navigate + wait) and reading the runner's JSON output for that round. The
+tracker's existing Notes — including past `blocked: <reason>` strings,
+"requires login", "external apply", "complex form", "exceeds round budget",
+"unique ATS", "Workday SSO" — are HINTS about prior runs. They are NOT a
+license to skip.
+
+Concretely, the following bulk-skip patterns are forbidden:
+
+- ❌ "This is a LinkedIn external apply, prior runs failed → blocked: linkedin_external_apply_unsupported" — without running round 1 first.
+- ❌ "Coinbase / Stripe / Disney / Databricks always have complex forms → blocked: complex_form / exceeds_round_budget" — without running round 1 first.
+- ❌ "Oracle HCM / Workday SSO requires account creation → blocked: account_wall" — without running round 1 first AND attempting login/account creation.
+- ❌ Emitting more than one `✗ ... blocked: ...` progress-log line in the same second across multiple distinct job_ids. That can only happen if you skipped the runner. If you find yourself about to do this, STOP — go run round 1 for each job.
+
+A `blocked` line is only legitimate when ALL of the following are true:
+
+1. You executed `round_1.json` (or a later round) for **this exact job_id** in the current session and read its JSON output.
+2. The output shows a real obstacle: `has_login`+`wait_human` timed out twice, OR the circuit breaker tripped (10 rounds same URL with no committed progress), OR a confirmed `error`.
+3. Your block `<reason>` describes what you OBSERVED on the page — concrete selectors, error text, missing fields — not a category guess from the tracker.
+
+If you genuinely believe a job cannot be auto-applied (e.g. you tried login and the site blocks browser automation), your block reason must cite the round number where you saw it (`blocked: round 4 saw error "..." selector="..."`).
+
+For any tracker row where you previously bulk-blocked without running the runner, treat it as `resume_ready` — the prior block reason is not evidence.
+
+### Per-job loop
+
 1. Read $JOB_SEARCH_TRACKER — find first `resume_ready` or `blocked` entry
 2. Write round_1.json for that job (navigate + wait only)
-3. Run: ~/voracle-env/bin/python3 {RUNNER_SCRIPT} round_1.json
+3. Run: python3 {RUNNER_SCRIPT} round_1.json
 4. **Check round 1 result immediately:**
    - `page.is_generic_page = true` → update tracker to `wrong_url`, add `{{"type":"close_tab"}}` as next action, skip to next job
    - `page.is_not_found = true` → update tracker to `expired`, add `{{"type":"close_tab"}}` as next action, skip to next job
@@ -168,7 +196,7 @@ Keep entries short and concrete. Skip if nothing novel came up — empty reviews
 
 Generate a password NOW (before starting rounds), via Bash:
 ```bash
-NEW_PASS=$(~/voracle-env/bin/python3 -c "
+NEW_PASS=$(python3 -c "
 import secrets
 print(secrets.token_urlsafe(10) + secrets.choice('!@#$%') + str(secrets.randbelow(9000)+1000))
 ")
@@ -245,7 +273,7 @@ Use `date +%H:%M:%S` for the timestamp. This is the only way the user sees real-
 ## Runner
 
 Script (already exists): {RUNNER_SCRIPT}
-Command: ~/voracle-env/bin/python3 {RUNNER_SCRIPT} <round.json>
+Command: python3 {RUNNER_SCRIPT} <round.json>
 Output: JSON on stdout
 
 ## Round JSON format
@@ -464,7 +492,24 @@ Never emit `wait_human` with reason "reCAPTCHA v3 prevents submission" without h
 
 - Round numbers MUST increment: round 1, 2, 3, … — **never repeat the same round number**.
 - If round N fails, the next file must be round N+1, not another round N.
-- If you cannot make progress after 5 rounds on the same page, mark as `blocked` and move on.
+- If you cannot make progress after 5 rounds on the same page, mark as `blocked` and move on. "No progress" means you ran 5 rounds against the SAME `page.url` (or same Workday step indicated by `page.interactive`) and `page.interactive` did not change in any meaningful way. Long forms that are progressing one section per round are NOT "stuck" — keep going.
+
+### ✋ Hand off to the human BEFORE marking blocked
+
+When you genuinely cannot proceed (5 rounds no progress on a stuck page, repeated `Locator.count: SyntaxError`, Oracle HCM custom components that don't commit, partial-fill leaving N issues, etc.), do NOT immediately mark `blocked`. Instead, emit a `wait_human` action so the user can take over the browser, finish the tricky bit by hand, and tell you to resume.
+
+```json
+[{{"type":"wait_human","reason":"Oracle HCM step 3 — 9 fields won't commit (selectors: …). Please complete this section manually, then `touch <state_dir>/.continue` to resume.","timeout_s":1800}}]
+```
+
+The runner pauses (up to 30 min) and waits for the user to either:
+- `touch <state_dir>/.continue` → returns `status=ok`. Re-probe `page.interactive` and continue from wherever the user left off (likely a later step or even the confirmation page — be ready for big state jumps).
+- `touch <state_dir>/.skip` → returns `status=skip`. Mark the job `blocked: <your reason>` and move on.
+- 30-min timeout → returns `status=timeout`. Mark the job `blocked: wait_human_timeout` and move on.
+
+Use `wait_human` at most TWICE per job. Two timeouts in a row → `blocked` (the existing rule).
+
+The `reason` string is what the user reads — make it actionable. Bad: "stuck on Oracle HCM". Good: "Oracle HCM step 3 — these 9 selectors won't commit: #x, #y, #z. Please fill them by hand and click Next, then resume."
 - **Circuit breaker — ATS dead-ends.** If the URL has not changed for **10 consecutive rounds** AND the same group of required-empty fields keeps failing to commit (e.g. pill buttons that visually highlight but `aria-pressed` never flips to `true`, or a dropdown whose value resets every round), STOP. Mark the job `blocked` with reason `ats_custom_component_not_automatable: <component class>` and move on. Do NOT exceed 15 rounds on any single page under any circumstances. Goldman Sachs AI VP burned 47 rounds on Oracle HCM pills exactly because this limit wasn't enforced.
 - Hard limit: the runner will abort after 4 runs of the same round number.
 
@@ -515,13 +560,14 @@ Read/Write/Edit/Glob/Bash tools. No browser tools.
 """
 
 
-def definition(headed: bool = False) -> AgentDefinition:
+def definition(headed: bool = False, model: str | None = None) -> AgentDefinition:
     return AgentDefinition(
         description=(
             "Submits job applications via an iterative code-act loop. "
             "Writes action JSON → runs submit_runner.py → reads page state → "
             "writes next action JSON. Repeats until applied, blocked, or error."
         ),
+        model=model or "sonnet",
         prompt=HEADER + load_skill_prompt("submitter"),
         tools=["Bash", "Read", "Write", "Edit", "Glob"],
     )
