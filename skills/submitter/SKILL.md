@@ -72,19 +72,21 @@ python3 $SKILLS_DIR/submitter/scripts/submit_runner.py round_1.json
 Read stdout JSON:
 
 1. For every `not_found` action result, try an alternative selector next round.
-2. `page.has_login` → add `wait_human` with reason "Login required". Do not immediately mark `blocked`.
+2. `page.has_login` → apply **Login wall strategy** (decision tree, `wait_human_login`, or Forgot Password flow). Do not use bare `wait_human` for login — it lacks auto-proceed. See agents/submitter.py "Login wall strategy" section.
 3. `page.has_captcha` → add `wait_human` with reason "CAPTCHA detected". Do not immediately mark `blocked`.
-4. `page.confirmed = true` → mark `applied`, stop.
-5. `page.interactive` — scan for unfilled required inputs, Submit/Next buttons, file inputs not yet uploaded.
+4. `page.has_email_verification` → next round, use `fetch_email_code` action to extract OTP code from email. Do NOT use `wait_human` for this.
+5. `page.confirmed = true` → mark `applied`, stop.
+6. `page.interactive` — scan for unfilled required inputs, Submit/Next buttons, file inputs not yet uploaded.
 
 Write `round_N.json` with only the actions needed for this round. Fill newly revealed fields, retry `not_found` selectors, click Next/Submit.
 
 Stop when:
-- `page.confirmed = true` → `applied`
-- `wait_human` timed out twice → `blocked`
-- 5 rounds on same page/URL with no progress → `wait_human` (before marking `blocked`)
+- `page.confirmed = true` → mark `applied`, stop
+- `wait_human` timed out twice → mark `blocked`
+- 5 rounds on same page/URL with no progress → emit `wait_human` (before marking `blocked`)
 - 10 consecutive rounds, same URL, same failing fields → hard circuit breaker, mark `blocked: stuck` (cannot exceed)
-- 404 / wrong page → `error`
+- `page.is_generic_page = true` (round 1) → mark `wrong_url`
+- `page.is_not_found = true` (round 1) → mark `expired`
 
 **Never mark `blocked` without running round 1 first.** The tracker's existing Notes are hints from previous runs, not evidence about the current state. Prior strings like "external apply", "complex form", "account wall", "exceeds round budget", "unique ATS" do NOT permit you to emit `blocked: <reason>` before this session has executed `round_1.json` for that exact `job_id` and observed real obstacles in the runner output. Bulk-blocking many jobs in a single second is a strong signal you skipped the runner — don't.
 
@@ -166,7 +168,9 @@ Tracker Notes contain "Found on YYYY-MM-DD via X". Extract X and match to dropdo
 
 - Applied → `applied`, append `Applied <date>` to Notes
 - Blocked → `blocked`, append reason to Notes
-- Wrong URL / permanent error → `error`, append reason to Notes
+- Wrong URL (generic page) → `wrong_url`, append reason to Notes
+- Not found (404 / expired) → `expired`, append reason to Notes
+- Other errors → `error`, append reason to Notes
 
 ## Output
 

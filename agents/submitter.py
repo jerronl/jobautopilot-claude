@@ -546,7 +546,8 @@ The `reason` string is what the user reads — make it actionable. Bad: "stuck o
 
 Use `page.interactive` to identify unfilled fields for the next round.
 Use `page.confirmed = true` to detect successful submission.
-Use `page.has_captcha` or `page.has_login` to decide whether to emit `wait_human`.
+Use `page.has_captcha` to decide whether to emit `wait_human` (CAPTCHA only).
+Use `page.has_login` to trigger the Login wall strategy (not bare `wait_human`).
 
 ## Round file naming
 
