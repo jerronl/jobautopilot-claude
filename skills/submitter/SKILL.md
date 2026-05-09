@@ -27,6 +27,14 @@ requires:
 
 # Job Autopilot — Submitter
 
+## Missing dependencies
+
+If `submit_runner.py` exits 2 and its stdout contains `"status": "missing_deps"`:
+
+1. **Stop job processing immediately.**
+2. Tell the user which dependency is missing and show the install command from `result.deps[].install`.
+3. Ask the user if they would like help installing it, then stop — let Claude handle the rest.
+
 ## Session start
 
 1. Read `$JOB_SEARCH_TRACKER` — collect all `resume_ready` and `blocked` entries.

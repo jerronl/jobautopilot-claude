@@ -22,7 +22,15 @@ Exit codes:
 import asyncio, json, os, random, shutil, socket, subprocess, sys, time
 os.environ.setdefault("NODE_NO_WARNINGS", "1")
 from pathlib import Path
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+try:
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+except ImportError:
+    print(json.dumps({
+        "status": "missing_deps",
+        "deps": [{"name": "playwright", "install": "pip install playwright && playwright install chromium"}],
+        "error": "playwright Python package is not installed",
+    }))
+    sys.exit(2)
 
 # Browser profile — stored alongside other agent profiles; configurable via env var
 _BROWSER_PROFILE_ROOT = Path.home() / ".jobautopilot" / "browser_profiles"
@@ -112,7 +120,12 @@ def _chromium_exe() -> str:
     ]:
         if candidate and Path(candidate).exists():
             return candidate
-    raise RuntimeError("Chromium not found")
+    print(json.dumps({
+        "status": "missing_deps",
+        "deps": [{"name": "playwright-chromium", "install": "playwright install chromium"}],
+        "error": "Chromium browser not found",
+    }))
+    sys.exit(2)
 
 
 async def _tag_page(page, job_id: str) -> None:
@@ -495,10 +508,17 @@ async def exec_action(page, action: dict) -> dict:
             res["status"] = "ok"
 
         elif t == "fill":
-            sel = action["selector"]
-            el  = page.locator(sel).first
+            sel    = action["selector"]
+            iframe = action.get("iframe")  # optional CSS selector for an iframe
+            if iframe:
+                el = page.frame_locator(iframe).locator(sel).first
+            else:
+                el = page.locator(sel).first
             if await el.count() > 0:
-                await el.scroll_into_view_if_needed()
+                try:
+                    await el.scroll_into_view_if_needed()
+                except Exception:
+                    pass
                 await el.fill(action.get("value", ""))
                 res["status"] = "ok"
             else:
@@ -576,22 +596,22 @@ async def exec_action(page, action: dict) -> dict:
             el = page.locator(sel).first
             if await el.count() > 0:
                 await el.scroll_into_view_if_needed()
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.15)
                 box = await el.bounding_box()
                 if box:
-                    # Warm up mouse with 2-3 moves around the page before approaching button
-                    for _ in range(random.randint(2, 3)):
+                    # Warm up mouse with 1-2 moves around the page before approaching button
+                    for _ in range(random.randint(1, 2)):
                         await page.mouse.move(
                             random.randint(150, 700), random.randint(150, 500)
                         )
-                        await asyncio.sleep(random.uniform(0.12, 0.25))
+                        await asyncio.sleep(random.uniform(0.04, 0.10))
                     # Approach button in two steps with slight overshoot
                     cx = box["x"] + box["width"] * random.uniform(0.3, 0.7)
                     cy = box["y"] + box["height"] * random.uniform(0.3, 0.7)
                     await page.mouse.move(cx - random.uniform(10, 25), cy - random.uniform(5, 15))
-                    await asyncio.sleep(random.uniform(0.10, 0.20))
+                    await asyncio.sleep(random.uniform(0.04, 0.08))
                     await page.mouse.move(cx, cy)
-                    await asyncio.sleep(random.uniform(0.12, 0.22))
+                    await asyncio.sleep(random.uniform(0.05, 0.10))
                     await page.mouse.click(cx, cy)
                 else:
                     await el.click()
@@ -799,14 +819,49 @@ async def exec_action(page, action: dict) -> dict:
                             _log(f"  found reset link: {link[:80]}...")
                             break
                     if not link:
-                        # Fall back to numeric OTP codes — scan visible text only
-                        # Only 5-8 digits — 4-digit numbers are almost always years
-                        # (e.g. "2026") and cause false positives.
-                        matches = _re.findall(r'\b(\d{5,8})\b', visible)
-                        if matches:
-                            six_digit = [m for m in matches if len(m) == 6]
-                            code = six_digit[0] if six_digit else matches[0]
-                            _log(f"  found code: {code}")
+                        # Scope to the Gmail email body if available — the full page
+                        # contains sidebar/footer noise (e.g. Greenhouse's office
+                        # address footer "New York, NY 10011" was matching as a
+                        # 5-digit OTP for unrelated jobs).
+                        body_text = visible
+                        if provider == "gmail":
+                            try:
+                                # Use .last — in a Gmail thread view the newest email
+                                # body is the last .a3s div (oldest is first).
+                                body_text = await email_page.locator(".a3s").last.inner_text(timeout=2000)
+                            except Exception:
+                                body_text = visible
+                        # Prefer codes that appear right after a code-context phrase.
+                        # Many providers (Greenhouse, Workday, etc.) use 6-8 char
+                        # alphanumeric codes — \d-only regex misses them entirely
+                        # and falls back to noise like ZIP codes in address footers.
+                        ctx_patterns = [
+                            r'(?:security[\s-]?code|verification[\s-]?code|your[\s-]?code|access[\s-]?code|confirmation[\s-]?code|one[\s-]?time[\s-]?code|otp|pin)\s*(?:is|:)?\s*[\n\r]*\s*([A-Z0-9]{4,10})\b',
+                            r'\b([A-Z0-9]{4,10})\b\s*(?:is|to)?\s*(?:your|the)?\s*(?:security[\s-]?code|verification[\s-]?code|one[\s-]?time[\s-]?code|otp)',
+                            # Toast / Clinch Talent format: "Here is the code required to complete your form"
+                            r'code required to complete[^\n]*\n+\s*([A-Z0-9]{4,10})\b',
+                            # Generic: standalone alphanumeric code on its own line after "code" keyword in same paragraph
+                            r'(?:code|Code)[^\n]{0,80}\n\n([A-Z0-9]{4,10})\b',
+                        ]
+                        for pat in ctx_patterns:
+                            # Use findall to get ALL matches; take the LAST one
+                            # (threaded emails show oldest first — we want the newest code).
+                            all_m = _re.findall(pat, body_text, _re.IGNORECASE)
+                            if all_m:
+                                cand = all_m[-1].upper()
+                                if not _re.fullmatch(r'\d{4}', cand):  # skip bare years
+                                    code = cand
+                                    _log(f"  found code by context: {code}")
+                                    break
+                        if not code:
+                            # Numeric-only fallback. Restrict to 6-8 digits (5-digit
+                            # matches were too greedy: ZIP codes in address footers
+                            # like Greenhouse's 10011 leaked through).
+                            matches = _re.findall(r'\b(\d{6,8})\b', body_text)
+                            if matches:
+                                six_digit = [m for m in matches if len(m) == 6]
+                                code = six_digit[0] if six_digit else matches[0]
+                                _log(f"  found numeric code: {code}")
                 except Exception:
                     pass
                 if not code and not link:
@@ -1005,7 +1060,20 @@ async def main():
         await _tag_page(page, JOB_ID)
 
         results = []
+        _last_fetch_result = {}   # tracks latest fetch_email_code / evaluate result for template substitution
         for action in ACTIONS:
+            # Template substitution: replace {{result.code}}, {{result.link}} etc.
+            # with values from the most recent fetch_email_code or evaluate result.
+            if _last_fetch_result:
+                action = dict(action)
+                for key in ("value", "url", "reason"):
+                    if key in action and isinstance(action[key], str):
+                        new_val = action[key]
+                        new_val = new_val.replace("{{result.code}}", str(_last_fetch_result.get("code", "")))
+                        new_val = new_val.replace("{{result.link}}", str(_last_fetch_result.get("link", "")))
+                        new_val = new_val.replace("{{result.status}}", str(_last_fetch_result.get("status", "")))
+                        action[key] = new_val
+
             # Special: close_tab closes current page (but only if not last)
             if action.get("type") == "close_tab":
                 all_pages = [pg for ctx in browser.contexts for pg in ctx.pages]
@@ -1019,6 +1087,9 @@ async def main():
 
             pages_before = len(ctx.pages)
             r = await exec_action(page, action)
+            # Track fetch_email_code result for use in subsequent actions
+            if action.get("type") == "fetch_email_code" and r.get("status") == "ok":
+                _last_fetch_result = {"code": r.get("code", ""), "link": r.get("link", ""), "status": r.get("status", "")}
             results.append(r)
             _log(f"  {r['status']:12} {r['action']}")
             # If the action opened a new tab (popup), switch to it.
@@ -1043,8 +1114,26 @@ async def main():
 
         # Persist the current tab's URL so subsequent rounds can re-find it
         # even if the user (or other scripts) opened additional tabs after it.
+        # Also track a "stuck on same URL" counter so the agent can see when
+        # it's iterating selector variations without making forward progress.
         current_url = page.url
+        url_streak_file = Path(BROWSER_STATE_DIR) / ".url_streak"
         try:
+            prev_hint = tab_hint_file.read_text().strip() if tab_hint_file.exists() else ""
+            if prev_hint == current_url:
+                streak = int(url_streak_file.read_text()) if url_streak_file.exists() else 1
+                streak += 1
+            else:
+                streak = 1
+            url_streak_file.write_text(str(streak))
+            page_state["same_url_rounds"] = streak
+            if streak >= 3:
+                page_state["stuck_warning"] = (
+                    f"URL unchanged for {streak} rounds — STOP rotating selector "
+                    f"variations. Run a diagnostic-only round (pure evaluate, no "
+                    f"click/fill) to dump the form/dropdown DOM, then re-Read the "
+                    f"site + ATS knowledge files with the dump in hand."
+                )
             tab_hint_file.write_text(current_url)
         except Exception:
             pass
