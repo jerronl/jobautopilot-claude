@@ -145,6 +145,26 @@ For any tracker row where you previously bulk-blocked without running the runner
 7. Read JSON stdout → plan next round → run it
 8. Repeat until applied/blocked/error → next job
 
+### Stuck detection — diagnose before retrying
+
+If you have run **3 rounds on the same screen** (same `page.url`, same step indicator, no new fields committed) without forward progress, **STOP** writing more variations of the same action. Trying selector A then B then C in a tight loop wastes rounds and is exactly the failure mode that drives users to file complaints.
+
+Instead, do this once, in order:
+
+1. **Diagnostic round** — write ONE round whose actions are pure `evaluate` calls that dump:
+   - the full visible form (`form.querySelectorAll('label, input, select, button, [role="listbox"], [role="option"]')` with text + id + name)
+   - any visible `[data-automation-id="inputAlert"]` / `.error` / `[role="alert"]` text
+   - for a stuck dropdown: open it, then enumerate its `[role="option"]` / `li` children with text + id + aria-level
+   No `click`/`fill` — just observation. The goal is to see what's actually on the page, not to advance.
+
+2. **Re-read the knowledge base** *with the dump in hand*. The first read on round 2 may have skimmed past the relevant note because you didn't yet know which selector was failing. Re-read `sites/<slug>.md` and the ATS playbook now — the answer is probably already there.
+
+3. **One targeted attempt** based on the dump + knowledge. If a knowledge note says "use keyboard navigation" and you've been clicking, switch. If the dump shows the option you want has a stable id, click that id within the same round as opening the dropdown.
+
+4. **Still stuck after the targeted attempt?** Emit `wait_human` with a clear reason that includes what you saw in the dump and what you tried. Do NOT silently rotate through more selector variations.
+
+The runner's `_MAX_SAME_ROUND=4` guard only catches re-running the same round NUMBER. It does NOT catch the more common case of round N, N+1, N+2 all attacking the same screen with cosmetic differences. That detection is your job.
+
 ## Knowledge-base review — ONCE per job, after it finishes
 
 After a job reaches a terminal state (applied / blocked / error) and you've written the progress log line, do a single review pass BEFORE moving to the next job. Do NOT edit knowledge files during the round loop — only here.

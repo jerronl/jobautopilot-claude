@@ -2,7 +2,7 @@
 
 Applies to any URL matching `*.oraclecloud.com/hcmUI/CandidateExperience/*` or containing `/hcmUI/`.
 
-Verified against `hdpc.fa.us2.oraclecloud.com` (Goldman Sachs Applied AI Researcher VP, 2026-04-07) — end-to-end submitted successfully after 21 rounds.
+Verified against `hdpc.fa.us2.oraclecloud.com` on 2026-04-07 — end-to-end submission succeeded after 21 rounds.
 
 ## Critical: `.cx-select-pill-section` pill components
 
@@ -17,7 +17,7 @@ Oracle HCM Redwood uses custom "pill" components for consent checkboxes, ethnici
 {"type":"evaluate","expression":"(() => { const p = Array.from(document.querySelectorAll('.cx-select-pill-section')).find(e => e.textContent.includes('I consent')); p.click(); })()"}
 ```
 
-Pills appear to highlight briefly then reset. `aria-pressed` never flips to `true`. Goldman Sachs burned 47 rounds on this exact pattern before the fix.
+Pills appear to highlight briefly then reset. `aria-pressed` never flips to `true`. One earlier session burned 47 rounds on this exact pattern before the fix.
 
 ### ✅ What works
 

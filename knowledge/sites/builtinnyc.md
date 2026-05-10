@@ -18,6 +18,10 @@
 - **2026-04-10** Discipline autocomplete: "Computational Finance" is not a listed discipline. "Finance" is available and is the closest match.
 - **2026-04-10** Degree autocomplete: "Master of Science" not listed. Options include "Master of Business Administration (M.B.A.)" and "Master's Degree".
 
+- **2026-05-07** BuiltIn Easy Apply proxy submission sometimes fails with a "We Hit a Small Snag — We couldn't submit your application — please submit it on the company's site." error modal. This is not a blocking error — the modal contains a direct Greenhouse link (`https://job-boards.greenhouse.io/<company>/jobs/<id>`). Navigate to that URL and submit directly via Greenhouse. Detected for Affirm Manager ML Fraud (job 7710178003).
+- **2026-05-07** Cookie banner buttons (Accept/Reject) are `type='submit'` — this causes `button[type='submit']:has-text('Submit Application')` to timeout because Playwright finds Accept/Reject first. Use more specific selector `.btn.btn-primary:has-text('Submit Application')` or ensure the cookie banner is dismissed first.
+- **2026-05-07** Location field Alpine.js `x-on:input.debounce` does NOT fire when the field value is empty after a JS `value=''` clear followed by `fill`. The debounce only fires when actual keystrokes type characters. Use `press` key-by-key (each letter with 200ms wait) then ArrowDown+Enter — this is the only reliable approach.
+
 ## Known blockers
 
 - **2026-04-10** Security code verification requires Gmail access. If Gmail is not signed in to the submit browser, cannot auto-fetch the code.
